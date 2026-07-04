@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 
 final class HotkeyMonitor {
     private let onTrigger: () -> Void
+    private(set) var diagnosticMessage = "快捷键尚未启动。"
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
     private var fallbackGlobalMonitor: Any?
@@ -20,7 +21,10 @@ final class HotkeyMonitor {
     func start() {
         let registrationStatus = registerCarbonHotKey()
         if registrationStatus != noErr {
+            diagnosticMessage = "Option+Tab 系统热键注册失败，状态码：\(registrationStatus)。已启用 NSEvent 兜底监听。"
             startFallbackMonitors()
+        } else {
+            diagnosticMessage = "Option+Tab 系统热键已注册成功。"
         }
     }
 
@@ -42,6 +46,7 @@ final class HotkeyMonitor {
         eventHandlerRef = nil
         fallbackGlobalMonitor = nil
         fallbackLocalMonitor = nil
+        diagnosticMessage = "快捷键监听已停止。"
     }
 
     private func registerCarbonHotKey() -> OSStatus {

@@ -40,6 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(makeMenuItem(title: "翻译当前选中文字", action: #selector(translateFromMenu)))
+        menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
+        menu.addItem(makeMenuItem(title: "查看快捷键状态", action: #selector(showHotkeyStatus)))
         menu.addItem(makeMenuItem(title: "检查辅助功能权限", action: #selector(checkAccessibilityPermission)))
         menu.addItem(makeMenuItem(title: "检查/启动本地翻译服务", action: #selector(checkBackendService)))
         menu.addItem(.separator())
@@ -128,6 +130,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func translateFromMenu() {
         handleTranslateShortcut()
+    }
+
+    /// Shows the floating panel without reading selection or calling the model.
+    ///
+    /// This menu command isolates the UI layer: if it appears, the popover
+    /// drawing path is healthy and later failures are in shortcut capture,
+    /// selection capture, backend startup, or model calls.
+    @objc private func showTestPopover() {
+        floatingPanel.showResult("测试弹窗正常。")
+    }
+
+    /// Displays how the global shortcut was registered for this app instance.
+    ///
+    /// Carbon hotkey registration can fail when the same chord is already owned
+    /// by macOS or another app. Surfacing the status in-app makes shortcut
+    /// failures visible instead of leaving the menu-bar app silently idle.
+    @objc private func showHotkeyStatus() {
+        let message = hotkeyMonitor?.diagnosticMessage ?? "快捷键监听器尚未创建。"
+        floatingPanel.showResult(message)
     }
 
     @objc private func checkAccessibilityPermission() {
