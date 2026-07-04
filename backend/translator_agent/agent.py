@@ -1,9 +1,9 @@
 """LangChain translation agent.
 
-The current product need is deliberately narrow: translate the selected text
-and return only the translated content. Keeping the prompt and model call in one
-class gives the macOS layer a stable local API while still allowing future
-agent features such as glossary lookup, rewrite modes, and history tools.
+The desktop client sends selected text and receives a compact translation card.
+Keeping prompt policy and model calls in one class gives the macOS layer a
+stable local API while still allowing future agent features such as glossary
+lookup, rewrite modes, and history tools.
 """
 
 from __future__ import annotations
@@ -43,7 +43,8 @@ class TranslatorAgent:
 
         Args:
             text: Raw text captured from the foreground macOS application.
-            target_language: Optional target language from the desktop client.
+            target_language: Kept for API compatibility; the current prompt
+                auto-detects Chinese vs English instead of trusting the client.
 
         Raises:
             TranslationError: When the selected text is empty or the model does
@@ -54,16 +55,27 @@ class TranslatorAgent:
         if not clean_text:
             raise TranslationError("未读取到可翻译的选中文字。")
 
-        target = (target_language or self._settings.default_target_language).strip()
+        # `target_language` stays in the public API for older desktop builds,
+        # but the product now chooses direction from the selected text itself.
         messages = [
             SystemMessage(
                 content=(
-                    "你是一个桌面划词翻译助手。"
-                    "请只输出译文，不输出解释、引号、Markdown 标题或额外寒暄。"
-                    "保留原文中的换行、列表层次、代码标识符、URL 和数字。"
+                    "你是一个桌面划词翻译和双语词典助手。"
+                    "先判断原文主要语言：主要是英文就翻译成简体中文，"
+                    "主要是中文就翻译成自然英文。"
+                    "候选译法必须使用目标语言。"
+                    "如果原文是单词、固定搭配或短语，必须给 3-6 个常用候选译法；"
+                    "如果候选依赖语境，要在括号里用很短的说明标明语境。"
+                    "例如中文“标准化的”可给 standardized、normalized、"
+                    "canonical、orthonormal（数学/线性代数语境）等候选。"
+                    "输出格式：第一行“主译：...”。"
+                    "短词短语随后输出“候选：”并用短横线列出候选；"
+                    "句子或段落不要为了凑候选添加同义改写。"
+                    "不要输出 Markdown 标题、引号或寒暄。"
+                    "保留原文中的代码标识符、URL、数字和必要换行。"
                 )
             ),
-            HumanMessage(content=f"目标语言：{target}\n\n原文：\n{clean_text}"),
+            HumanMessage(content=f"原文：\n{clean_text}"),
         ]
 
         response = self._llm.invoke(messages)

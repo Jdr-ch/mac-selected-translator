@@ -102,6 +102,7 @@ final class FloatingPanelController {
 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        hidePanel()
     }
 
     /// Hides the floating result panel when the user clicks the close control.
@@ -148,8 +149,13 @@ final class FloatingPanelController {
         let scrollHeight = height - padding * 2 - titleHeight - gap
         let contentWidth = width - padding * 2
         let closeX = width - padding - buttonSize
-        let copyX = closeX - buttonGap - buttonSize
-        let titleRightInset = copyButton.isHidden ? buttonSize + buttonGap : buttonSize * 2 + buttonGap * 2
+        let titleRightInset = buttonSize + buttonGap
+        let copyX = copyButtonX(
+            bodyText: textView.string,
+            leftPadding: padding,
+            contentWidth: contentWidth,
+            buttonSize: buttonSize
+        )
 
         panel.setContentSize(NSSize(width: width, height: height))
         containerView.frame = NSRect(x: 0, y: 0, width: width, height: height)
@@ -161,7 +167,7 @@ final class FloatingPanelController {
         )
         copyButton.frame = NSRect(
             x: copyX,
-            y: height - padding - buttonSize + 2,
+            y: padding + scrollHeight - buttonSize + 2,
             width: buttonSize,
             height: buttonSize
         )
@@ -185,6 +191,29 @@ final class FloatingPanelController {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.textContainer?.widthTracksTextView = true
+    }
+
+    /// Places copy near the first translated line instead of grouping it with
+    /// the close button, so short word translations can be copied where the
+    /// user's eye already lands.
+    private func copyButtonX(
+        bodyText: String,
+        leftPadding: CGFloat,
+        contentWidth: CGFloat,
+        buttonSize: CGFloat
+    ) -> CGFloat {
+        let firstLine = bodyText
+            .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? ""
+        let font = textView.font ?? .systemFont(ofSize: 14)
+        let firstLineWidth = NSString(string: firstLine).size(withAttributes: [.font: font]).width
+        let desiredX = leftPadding + firstLineWidth + 8
+
+        // The copy button follows the translated word or first-line phrase, but
+        // clamps inside the body area so longer candidate lines never push the
+        // control outside the popover.
+        return min(max(desiredX, leftPadding), leftPadding + contentWidth - buttonSize)
     }
 
     private func measuredHeight(for text: String, width: CGFloat) -> CGFloat {
