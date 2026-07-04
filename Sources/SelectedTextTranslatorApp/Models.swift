@@ -4,6 +4,8 @@ enum TranslatorAppError: LocalizedError {
     case accessibilityPermissionMissing
     case noSelectedText
     case backendNotReachable(String)
+    case backendProjectRootMissing
+    case backendStartupFailed(String)
     case invalidBackendResponse
     case backendError(String)
 
@@ -15,6 +17,10 @@ enum TranslatorAppError: LocalizedError {
             return "没有读取到选中文字。请先在当前 App 中选中一段文字，再按 Shift+F、Shift+F。"
         case .backendNotReachable(let detail):
             return "无法连接本地翻译服务：\(detail)"
+        case .backendProjectRootMissing:
+            return "缺少项目路径配置。请通过 scripts/build_app.sh 重新生成 App，或设置 TRANSLATOR_PROJECT_ROOT。"
+        case .backendStartupFailed(let detail):
+            return "本地翻译服务启动失败：\(detail)"
         case .invalidBackendResponse:
             return "本地翻译服务返回格式不正确。"
         case .backendError(let message):

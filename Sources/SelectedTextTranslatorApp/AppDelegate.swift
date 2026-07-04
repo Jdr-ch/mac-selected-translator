@@ -2,16 +2,25 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let backendClient = BackendClient()
+    private let backendClient: BackendClient
+    private let backendSupervisor: BackendSupervisor
     private let selectionReader = AccessibilitySelectionReader()
     private let floatingPanel = FloatingPanelController()
     private var hotkeyMonitor: HotkeyMonitor?
     private var statusItem: NSStatusItem?
     private var isTranslating = false
 
+    override init() {
+        let configuration = AppConfiguration()
+        self.backendClient = BackendClient(configuration: configuration)
+        self.backendSupervisor = BackendSupervisor(configuration: configuration)
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         promptForAccessibilityIfNeeded()
+        warmUpBackend()
 
         hotkeyMonitor = HotkeyMonitor { [weak self] in
             self?.handleTranslateShortcut()
@@ -21,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
+        backendSupervisor.terminateOwnedBackend()
     }
 
     private func setupStatusItem() {
@@ -43,6 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 keyEquivalent: ""
             )
         )
+        menu.addItem(
+            NSMenuItem(
+                title: "检查/启动本地翻译服务",
+                action: #selector(checkBackendService),
+                keyEquivalent: ""
+            )
+        )
         menu.addItem(.separator())
         menu.addItem(
             NSMenuItem(
@@ -58,6 +75,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func promptForAccessibilityIfNeeded() {
         if !AccessibilitySelectionReader.isAccessibilityTrusted(prompt: true) {
             floatingPanel.showError("首次运行需要授予辅助功能权限，授权后请重新启动本工具。")
+        }
+    }
+
+    /// Starts the backend shortly after app launch so the first hotkey feels instant.
+    ///
+    /// Errors are surfaced in the same floating panel used by translation
+    /// failures. That gives Finder-launched `.app` users a visible reason when
+    /// `.env` is missing an API key or the Python virtual environment has not
+    /// been created yet.
+    private func warmUpBackend() {
+        Task { @MainActor in
+            do {
+                try await backendSupervisor.ensureBackendRunning()
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                floatingPanel.showError(message)
+            }
         }
     }
 
@@ -89,6 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
+            floatingPanel.showLoading("正在检查本地翻译服务...")
+            try await backendSupervisor.ensureBackendRunning()
             let selectedText = try await selectionReader.readSelectedText()
             floatingPanel.showLoading("正在翻译...")
             let translation = try await backendClient.translate(selectedText, targetLanguage: "中文")
@@ -108,6 +144,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             floatingPanel.showResult("辅助功能权限已开启。")
         } else {
             floatingPanel.showError("辅助功能权限尚未开启，授权后请重新启动本工具。")
+        }
+    }
+
+    @objc private func checkBackendService() {
+        Task { @MainActor in
+            do {
+                floatingPanel.showLoading("正在检查本地翻译服务...")
+                try await backendSupervisor.ensureBackendRunning()
+                floatingPanel.showResult("本地翻译服务已就绪。")
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                floatingPanel.showError(message)
+            }
         }
     }
 

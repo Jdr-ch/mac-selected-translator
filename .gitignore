@@ -1,6 +1,7 @@
 /.idea/
 /.build/
 /.swiftpm/
+/dist/
 /.venv/
 /.env
 .DS_Store

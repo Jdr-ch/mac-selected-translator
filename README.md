@@ -39,7 +39,36 @@ export DASHSCOPE_API_KEY=你的 DashScope 或 Model Studio API Key
 
 ## 启动
 
-开发模式一条命令启动后端和 Mac App：
+### 像普通 App 一样启动
+
+生成双击可启动的 `.app`：
+
+```bash
+cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
+./scripts/build_app.sh
+```
+
+生成后可以直接双击：
+
+```text
+/Users/jiangdengrui/Documents/AI/mac-selected-translator/dist/Selected Text Translator.app
+```
+
+也可以命令行打开：
+
+```bash
+./scripts/open_app.sh
+```
+
+这个 App 会自动检查并启动本地 Python 翻译服务。Finder 双击启动时通常不会继承终端里的 `export DASHSCOPE_API_KEY=...`，所以双击模式建议把真实 API Key 写到 `.env`，或者先设置到 macOS launchd 环境：
+
+```bash
+launchctl setenv DASHSCOPE_API_KEY 你的 DashScope 或 Model Studio API Key
+```
+
+### 开发模式
+
+开发模式仍然可以一条命令启动后端和 Mac App：
 
 ```bash
 cd /Users/jiangdengrui/Documents/AI/mac-selected-translator

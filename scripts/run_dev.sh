@@ -7,6 +7,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT_DIR}/scripts/load_env.sh"
 load_env_if_unset "${ROOT_DIR}/.env"
 
+export TRANSLATOR_PROJECT_ROOT="${TRANSLATOR_PROJECT_ROOT:-${ROOT_DIR}}"
+
 BACKEND_URL="${TRANSLATOR_BACKEND_URL:-http://127.0.0.1:8765}"
 
 if ! curl -fsS "${BACKEND_URL}/health" >/dev/null 2>&1; then

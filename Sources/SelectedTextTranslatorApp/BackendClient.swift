@@ -3,10 +3,8 @@ import Foundation
 struct BackendClient {
     private let endpoint: URL
 
-    init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        let rawBaseURL = environment["TRANSLATOR_BACKEND_URL"] ?? "http://127.0.0.1:8765"
-        let baseURL = rawBaseURL.hasSuffix("/") ? String(rawBaseURL.dropLast()) : rawBaseURL
-        self.endpoint = URL(string: "\(baseURL)/translate")!
+    init(configuration: AppConfiguration = AppConfiguration()) {
+        self.endpoint = configuration.translateURL
     }
 
     /// Sends selected text to the local LangChain backend.
