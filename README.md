@@ -28,6 +28,15 @@ DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 如果你的阿里云账号使用 Model Studio 工作空间 endpoint，把 `DASHSCOPE_BASE_URL` 改成控制台给出的完整 OpenAI-compatible `/v1` 地址。
 
+也可以完全不把 API Key 写进 `.env`，直接从当前 shell 环境读取：
+
+```bash
+export DASHSCOPE_API_KEY=你的 DashScope 或 Model Studio API Key
+./scripts/run_dev.sh
+```
+
+启动脚本会优先使用已有环境变量，`.env` 只用于补充未设置的本地默认值。
+
 ## 启动
 
 开发模式一条命令启动后端和 Mac App：

@@ -3,12 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ -f "${ROOT_DIR}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${ROOT_DIR}/.env"
-  set +a
-fi
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/load_env.sh"
+load_env_if_unset "${ROOT_DIR}/.env"
 
 BACKEND_URL="${TRANSLATOR_BACKEND_URL:-http://127.0.0.1:8765}"
 
