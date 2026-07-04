@@ -1,24 +1,27 @@
 import AppKit
 
 @MainActor
-final class FloatingPanelController {
+final class FloatingPanelController: NSObject, NSTextViewDelegate {
+    private static let candidateLinkScheme = "selected-translator-candidate"
+
     private let panel: NSPanel
     private let containerView = NSVisualEffectView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let copyButton = NSButton()
     private let closeButton = NSButton()
     private let textView = NSTextView()
     private let scrollView = NSScrollView()
     private var autoHideTimer: Timer?
     private var outsideClickMonitor: Any?
 
-    init() {
+    override init() {
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 120),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        super.init()
+
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
@@ -37,12 +40,6 @@ final class FloatingPanelController {
         titleLabel.lineBreakMode = .byTruncatingTail
 
         configureIconButton(
-            copyButton,
-            systemSymbolName: "doc.on.doc",
-            accessibilityLabel: "复制",
-            action: #selector(copyCurrentTranslation)
-        )
-        configureIconButton(
             closeButton,
             systemSymbolName: "xmark.circle.fill",
             accessibilityLabel: "关闭",
@@ -55,6 +52,11 @@ final class FloatingPanelController {
         textView.textContainerInset = NSSize(width: 0, height: 0)
         textView.font = .systemFont(ofSize: 14)
         textView.textColor = .labelColor
+        textView.delegate = self
+        textView.linkTextAttributes = [
+            .foregroundColor: NSColor.controlAccentColor,
+            .underlineStyle: 0
+        ]
 
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
@@ -63,7 +65,6 @@ final class FloatingPanelController {
         scrollView.documentView = textView
 
         containerView.addSubview(titleLabel)
-        containerView.addSubview(copyButton)
         containerView.addSubview(closeButton)
         containerView.addSubview(scrollView)
         panel.contentView = containerView
@@ -76,33 +77,50 @@ final class FloatingPanelController {
     /// replaces them, because hiding the panel while the model is still working
     /// makes the shortcut feel unreliable.
     func showLoading(_ message: String) {
-        show(title: "划词翻译", body: message, autoHideAfter: nil, showsCopyButton: false)
+        show(title: "划词翻译", body: message, autoHideAfter: nil, enablesCandidateLinks: false)
     }
 
-    /// Shows the translated text and keeps it selectable for copy/paste.
+    /// Shows the translated text and makes candidate terms directly copyable.
     func showResult(_ translation: String) {
-        show(title: "翻译结果", body: translation, autoHideAfter: nil, showsCopyButton: true)
+        show(title: "翻译结果", body: translation, autoHideAfter: nil, enablesCandidateLinks: true)
     }
 
     /// Shows an actionable error from either macOS permission checks or backend calls.
     func showError(_ message: String) {
-        show(title: "翻译失败", body: message, autoHideAfter: 8, showsCopyButton: false)
+        show(title: "翻译失败", body: message, autoHideAfter: 8, enablesCandidateLinks: false)
     }
 
-    /// Copies the currently displayed translation to the system pasteboard.
+    /// Copies the clicked candidate term and then dismisses the result panel.
     ///
-    /// This action is only exposed for successful translation results, so it
-    /// copies the text the user is looking at instead of the original selected
-    /// source text or transient loading/error messages.
-    @objc private func copyCurrentTranslation() {
-        let text = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            return
+    /// The link payload is generated from the candidate line itself, so only
+    /// the term before the optional context parentheses is copied.
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url: URL?
+        if let swiftURL = link as? URL {
+            url = swiftURL
+        } else if let nsURL = link as? NSURL {
+            url = nsURL as URL
+        } else {
+            url = nil
+        }
+
+        guard
+            let url,
+            url.scheme == Self.candidateLinkScheme,
+            let candidate = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name == "text" })?
+                .value?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !candidate.isEmpty
+        else {
+            return false
         }
 
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        NSPasteboard.general.setString(candidate, forType: .string)
         hidePanel()
+        return true
     }
 
     /// Hides the floating result panel when the user clicks the close control.
@@ -114,12 +132,11 @@ final class FloatingPanelController {
         title: String,
         body: String,
         autoHideAfter seconds: TimeInterval?,
-        showsCopyButton: Bool
+        enablesCandidateLinks: Bool
     ) {
         autoHideTimer?.invalidate()
         titleLabel.stringValue = title
-        textView.string = body
-        copyButton.isHidden = !showsCopyButton
+        renderBody(body, enablesCandidateLinks: enablesCandidateLinks)
 
         let width: CGFloat = 420
         let horizontalPadding: CGFloat = 18
@@ -140,6 +157,146 @@ final class FloatingPanelController {
         }
     }
 
+    /// Renders model text and turns candidate bullet terms into click targets.
+    ///
+    /// The backend keeps the response as plain text for a stable HTTP contract;
+    /// this method is the single UI boundary that adds AppKit-specific link and
+    /// background styling for candidate terms.
+    private func renderBody(_ body: String, enablesCandidateLinks: Bool) {
+        let font = textView.font ?? .systemFont(ofSize: 14)
+        let attributedBody = NSMutableAttributedString(
+            string: body,
+            attributes: [
+                .font: font,
+                .foregroundColor: NSColor.labelColor
+            ]
+        )
+
+        if enablesCandidateLinks {
+            for candidate in candidateTokens(in: body) {
+                guard let url = candidateLinkURL(for: candidate.text) else {
+                    continue
+                }
+
+                attributedBody.addAttributes(
+                    [
+                        .link: url,
+                        .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.14),
+                        .foregroundColor: NSColor.controlAccentColor
+                    ],
+                    range: candidate.range
+                )
+            }
+        }
+
+        if let textStorage = textView.textStorage {
+            textStorage.setAttributedString(attributedBody)
+            return
+        }
+
+        textView.string = body
+    }
+
+    /// Builds a private URL payload so AppKit can route a clicked candidate back
+    /// through `NSTextViewDelegate` without exposing any external URL scheme.
+    private func candidateLinkURL(for candidate: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = Self.candidateLinkScheme
+        components.host = "copy"
+        components.queryItems = [URLQueryItem(name: "text", value: candidate)]
+        return components.url
+    }
+
+    /// Finds candidate bullet terms in the backend's plain-text response.
+    ///
+    /// Only bullet lines after the explicit `候选：` marker are treated as
+    /// copyable candidates. This avoids turning ordinary translated lists into
+    /// clickable terms when the selected source text itself contains bullets.
+    private func candidateTokens(in body: String) -> [(range: NSRange, text: String)] {
+        let nsBody = body as NSString
+        var tokens: [(range: NSRange, text: String)] = []
+        var isInCandidateSection = false
+
+        nsBody.enumerateSubstrings(
+            in: NSRange(location: 0, length: nsBody.length),
+            options: [.byLines]
+        ) { [weak self] line, lineRange, _, _ in
+            guard let self, let line else {
+                return
+            }
+
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine == "候选：" || trimmedLine == "候选:" {
+                isInCandidateSection = true
+                return
+            }
+
+            guard
+                isInCandidateSection,
+                let token = self.candidateToken(in: line, lineRange: lineRange)
+            else {
+                return
+            }
+            tokens.append(token)
+        }
+
+        return tokens
+    }
+
+    /// Extracts the clickable term from one candidate line.
+    private func candidateToken(in line: String, lineRange: NSRange) -> (range: NSRange, text: String)? {
+        let nsLine = line as NSString
+        var start = 0
+
+        while start < nsLine.length, isWhitespace(nsLine.character(at: start)) {
+            start += 1
+        }
+
+        guard start < nsLine.length else {
+            return nil
+        }
+
+        let marker = nsLine.substring(with: NSRange(location: start, length: 1))
+        guard marker == "-" || marker == "•" || marker == "·" else {
+            return nil
+        }
+
+        start += 1
+        while start < nsLine.length, isWhitespace(nsLine.character(at: start)) {
+            start += 1
+        }
+
+        var end = start
+        while end < nsLine.length {
+            let character = nsLine.substring(with: NSRange(location: end, length: 1))
+            if character == "（" || character == "(" {
+                break
+            }
+            end += 1
+        }
+
+        while end > start, isWhitespace(nsLine.character(at: end - 1)) {
+            end -= 1
+        }
+
+        guard end > start else {
+            return nil
+        }
+
+        let localRange = NSRange(location: start, length: end - start)
+        return (
+            NSRange(location: lineRange.location + localRange.location, length: localRange.length),
+            nsLine.substring(with: localRange)
+        )
+    }
+
+    private func isWhitespace(_ codeUnit: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(Int(codeUnit)) else {
+            return false
+        }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
+    }
+
     private func layoutPanel(width: CGFloat, height: CGFloat, bodyHeight: CGFloat) {
         let padding: CGFloat = 18
         let titleHeight: CGFloat = 20
@@ -150,12 +307,6 @@ final class FloatingPanelController {
         let contentWidth = width - padding * 2
         let closeX = width - padding - buttonSize
         let titleRightInset = buttonSize + buttonGap
-        let copyX = copyButtonX(
-            bodyText: textView.string,
-            leftPadding: padding,
-            contentWidth: contentWidth,
-            buttonSize: buttonSize
-        )
 
         panel.setContentSize(NSSize(width: width, height: height))
         containerView.frame = NSRect(x: 0, y: 0, width: width, height: height)
@@ -164,12 +315,6 @@ final class FloatingPanelController {
             y: height - padding - titleHeight,
             width: max(contentWidth - titleRightInset, 120),
             height: titleHeight
-        )
-        copyButton.frame = NSRect(
-            x: copyX,
-            y: padding + scrollHeight - buttonSize + 2,
-            width: buttonSize,
-            height: buttonSize
         )
         closeButton.frame = NSRect(
             x: closeX,
@@ -191,29 +336,6 @@ final class FloatingPanelController {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.textContainer?.widthTracksTextView = true
-    }
-
-    /// Places copy near the first translated line instead of grouping it with
-    /// the close button, so short word translations can be copied where the
-    /// user's eye already lands.
-    private func copyButtonX(
-        bodyText: String,
-        leftPadding: CGFloat,
-        contentWidth: CGFloat,
-        buttonSize: CGFloat
-    ) -> CGFloat {
-        let firstLine = bodyText
-            .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-            .first
-            .map(String.init) ?? ""
-        let font = textView.font ?? .systemFont(ofSize: 14)
-        let firstLineWidth = NSString(string: firstLine).size(withAttributes: [.font: font]).width
-        let desiredX = leftPadding + firstLineWidth + 8
-
-        // The copy button follows the translated word or first-line phrase, but
-        // clamps inside the body area so longer candidate lines never push the
-        // control outside the popover.
-        return min(max(desiredX, leftPadding), leftPadding + contentWidth - buttonSize)
     }
 
     private func measuredHeight(for text: String, width: CGFloat) -> CGFloat {
