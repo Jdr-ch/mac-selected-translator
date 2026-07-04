@@ -39,37 +39,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "划词翻译：按 Option+Shift+F"
 
         let menu = NSMenu()
-        menu.addItem(
-            NSMenuItem(
-                title: "翻译当前选中文字",
-                action: #selector(translateFromMenu),
-                keyEquivalent: ""
-            )
-        )
-        menu.addItem(
-            NSMenuItem(
-                title: "检查辅助功能权限",
-                action: #selector(checkAccessibilityPermission),
-                keyEquivalent: ""
-            )
-        )
-        menu.addItem(
-            NSMenuItem(
-                title: "检查/启动本地翻译服务",
-                action: #selector(checkBackendService),
-                keyEquivalent: ""
-            )
-        )
+        menu.addItem(makeMenuItem(title: "翻译当前选中文字", action: #selector(translateFromMenu)))
+        menu.addItem(makeMenuItem(title: "检查辅助功能权限", action: #selector(checkAccessibilityPermission)))
+        menu.addItem(makeMenuItem(title: "检查/启动本地翻译服务", action: #selector(checkBackendService)))
         menu.addItem(.separator())
-        menu.addItem(
-            NSMenuItem(
-                title: "退出",
-                action: #selector(quit),
-                keyEquivalent: "q"
-            )
-        )
+        menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
         statusItem = item
+    }
+
+    /// Creates status-menu commands that route directly to the app delegate.
+    ///
+    /// Status bar menu items do not reliably find the delegate through the
+    /// responder chain when their target is nil, so every command is wired to
+    /// `self` explicitly to avoid silent no-op clicks.
+    private func makeMenuItem(
+        title: String,
+        action: Selector,
+        keyEquivalent: String = ""
+    ) -> NSMenuItem {
+        let menuItem = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        menuItem.target = self
+        return menuItem
     }
 
     private func promptForAccessibilityIfNeeded() {

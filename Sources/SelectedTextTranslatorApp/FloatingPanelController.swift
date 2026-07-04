@@ -25,7 +25,6 @@ final class FloatingPanelController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.hidesOnDeactivate = true
 
         containerView.material = .popover
         containerView.state = .active

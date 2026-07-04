@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 
 final class HotkeyMonitor {
     private let onTrigger: () -> Void
@@ -44,7 +45,7 @@ final class HotkeyMonitor {
             && flags.contains(.option)
             && !flags.contains(.command)
             && !flags.contains(.control)
-        guard optionShiftOnly, event.charactersIgnoringModifiers?.lowercased() == "f" else {
+        guard optionShiftOnly, event.keyCode == kVK_ANSI_F else {
             return
         }
 
