@@ -14,7 +14,7 @@ enum TranslatorAppError: LocalizedError {
         case .accessibilityPermissionMissing:
             return "需要在 系统设置 > 隐私与安全性 > 辅助功能 中允许当前终端或 App。"
         case .noSelectedText:
-            return "没有读取到选中文字。请先在当前 App 中选中一段文字，再按 Shift+F、Shift+F。"
+            return "没有读取到选中文字。请先在当前 App 中选中一段文字，再按 Option+Shift+F。"
         case .backendNotReachable(let detail):
             return "无法连接本地翻译服务：\(detail)"
         case .backendProjectRootMissing:

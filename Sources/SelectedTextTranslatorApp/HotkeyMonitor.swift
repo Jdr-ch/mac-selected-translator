@@ -2,21 +2,17 @@ import AppKit
 
 final class HotkeyMonitor {
     private let onTrigger: () -> Void
-    private let doublePressInterval: TimeInterval = 0.75
     private var globalMonitor: Any?
     private var localMonitor: Any?
-    private var lastShiftFTime: TimeInterval = 0
 
     init(onTrigger: @escaping () -> Void) {
         self.onTrigger = onTrigger
     }
 
-    /// Starts listening for the Shift+F, Shift+F sequence globally.
+    /// Starts listening for the Option+Shift+F shortcut globally.
     ///
-    /// macOS does not treat "Shift+F+F" as a single native shortcut. This
-    /// monitor interprets it as two non-repeated Shift+F keyDown events within a
-    /// short window, which matches the requested gesture without intercepting
-    /// normal typing in the foreground application.
+    /// The shortcut is intentionally a single modifier chord now, so the app no
+    /// longer needs to keep timing state for a double-press sequence.
     func start() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event)
@@ -44,22 +40,16 @@ final class HotkeyMonitor {
         }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let onlyShift = flags.contains(.shift)
+        let optionShiftOnly = flags.contains(.shift)
+            && flags.contains(.option)
             && !flags.contains(.command)
             && !flags.contains(.control)
-            && !flags.contains(.option)
-        guard onlyShift, event.charactersIgnoringModifiers?.lowercased() == "f" else {
+        guard optionShiftOnly, event.charactersIgnoringModifiers?.lowercased() == "f" else {
             return
         }
 
-        let now = event.timestamp
-        if now - lastShiftFTime <= doublePressInterval {
-            lastShiftFTime = 0
-            DispatchQueue.main.async { [onTrigger] in
-                onTrigger()
-            }
-        } else {
-            lastShiftFTime = now
+        DispatchQueue.main.async { [onTrigger] in
+            onTrigger()
         }
     }
 

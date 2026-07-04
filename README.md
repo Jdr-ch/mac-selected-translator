@@ -1,10 +1,10 @@
 # Mac Selected Translator
 
-一个本机 macOS 划词翻译原型：选中文字后按 `Shift+F`、`Shift+F`，在鼠标附近弹出翻译浮层。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调 OpenAI-compatible Qwen。
+一个本机 macOS 划词翻译原型：选中文字后按 `Option+Shift+F`，在鼠标附近弹出翻译浮层。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调 OpenAI-compatible Qwen。
 
 ## 功能
 
-- 全局监听 `Shift+F` 连按两次。
+- 全局监听 `Option+Shift+F`。
 - 优先通过 macOS Accessibility API 读取当前选中文字。
 - 对不暴露选中属性的 App，临时执行 `Command+C` 读取剪贴板，并尽量恢复原剪贴板内容。
 - 通过本地 HTTP 服务调用 LangChain `ChatOpenAI`。
@@ -86,10 +86,10 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 ## 使用
 
 1. 在任意 App 中选中一段文字。
-2. 连续按两次 `Shift+F`。
-3. 等待鼠标附近浮层显示译文。
+2. 按 `Option+Shift+F`。
+3. 等待鼠标附近浮层显示译文，可点击右上角复制按钮复制译文。
 
-菜单栏会出现一个 `译` 图标，可用于手动触发、检查权限或退出。
+菜单栏会出现一个 `译` 图标，可用于手动触发、检查权限或退出。译文浮层点击关闭按钮或点击浮层外会隐藏。
 
 ## 单独启动
 

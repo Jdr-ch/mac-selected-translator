@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "译"
-        item.button?.toolTip = "划词翻译：按 Shift+F、Shift+F"
+        item.button?.toolTip = "划词翻译：按 Option+Shift+F"
 
         let menu = NSMenu()
         menu.addItem(
@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Handles the global Shift+F, Shift+F gesture.
+    /// Handles the global Option+Shift+F gesture.
     ///
     /// The method serializes translation requests so repeated hotkey presses do
     /// not create overlapping model calls or race the floating panel state.
