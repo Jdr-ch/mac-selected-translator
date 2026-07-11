@@ -8,10 +8,34 @@ lookup, rewrite modes, and history tools.
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
+import re
+
+import jieba
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from .config import Settings
+
+
+MAX_PHONETIC_WORDS = 5
+LATIN_LETTERS = "A-Za-zÀ-ÖØ-öø-ÿĀ-ſ\u1e00-\u1eff"
+ENGLISH_WORD_PATTERN = re.compile(
+    rf"[{LATIN_LETTERS}]+(?:['’-][{LATIN_LETTERS}]+)*"
+)
+CHINESE_TOKEN_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+IPA_TRANSCRIPTION_PATTERN = re.compile(r"/[^/\n]+/")
+PHONETIC_ENTRY_PATTERN = re.compile(
+    rf"([{LATIN_LETTERS}]+(?:['’-][{LATIN_LETTERS}]+)*)\s+/[^/\n]+/"
+)
+URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)\S+|\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/\S*)?",
+    re.IGNORECASE,
+)
+INLINE_CODE_PATTERN = re.compile(r"`[^`\n]+`")
+IPA_SIGNAL_CHARACTERS = "ˈˌɑɐɒæɓʙβɔɕçɗɖðʤəɚɛɜɝɞɟʄɡɢʛɦɧħɥʜɨɪʝɭɬʟɮɱɯɰŋɳɲɴøɵɸœɶɹɺɻɾʀʁɽʂʃʈθʊʋⱱʌɣɤχʎʐʑʒʔʕ"
+STANDALONE_TRANSCRIPTION_PATTERN = re.compile(
+    rf"(?<!\S)/(?=[^/\n]*[{IPA_SIGNAL_CHARACTERS}])[^/\n]+/(?!\S)"
+)
 
 
 class TranslationError(RuntimeError):
@@ -55,36 +79,176 @@ class TranslatorAgent:
         if not clean_text:
             raise TranslationError("未读取到可翻译的选中文字。")
 
+        requires_phonetics = self._requires_phonetics(clean_text)
+
         # `target_language` stays in the public API for older desktop builds,
         # but the product now chooses direction from the selected text itself.
         messages = [
-            SystemMessage(
-                content=(
-                    "你是一个桌面划词翻译和双语词典助手。"
-                    "先判断原文主要语言：主要是英文就翻译成简体中文，"
-                    "主要是中文就翻译成自然英文。"
-                    "候选译法必须使用目标语言。"
-                    "如果原文是单词、固定搭配或短语，必须给 3-6 个常用候选译法；"
-                    "如果候选依赖语境，要在括号里用很短的说明标明语境。"
-                    "例如中文“标准化的”可给 standardized、normalized、"
-                    "canonical、orthonormal（数学/线性代数语境）等候选。"
-                    "输出格式：第一行“主译：...”。"
-                    "短词短语随后输出“候选：”并用短横线列出候选；"
-                    "每个候选必须独占一行，格式为“- 候选词（可选语境）”，"
-                    "候选词放在短横线后的第一段，语境说明只能放在括号里。"
-                    "句子或段落不要为了凑候选添加同义改写。"
-                    "不要输出 Markdown 标题、引号或寒暄。"
-                    "保留原文中的代码标识符、URL、数字和必要换行。"
-                )
-            ),
+            SystemMessage(content=self._system_prompt(requires_phonetics)),
             HumanMessage(content=f"原文：\n{clean_text}"),
         ]
+
+        content = self._invoke(messages)
+        if requires_phonetics and not self._has_valid_phonetics(content, clean_text):
+            content = self._retry_with_phonetics(messages, content)
+            if not self._has_valid_phonetics(content, clean_text):
+                raise TranslationError("模型未按要求返回英文 IPA 音标。")
+        elif not requires_phonetics:
+            content = self._removing_phonetics_line(content)
+
+        return content
+
+    @classmethod
+    def _requires_phonetics(cls, text: str) -> bool:
+        """Return whether a bilingual selection falls within the 1-5 word rule."""
+
+        word_count = cls._selected_word_count(text)
+        return 1 <= word_count <= MAX_PHONETIC_WORDS
+
+    @staticmethod
+    def _selected_word_count(text: str) -> int:
+        """Count English and Chinese words without counting punctuation as words.
+
+        English contractions and hyphenated expressions count as one word. The
+        remaining Chinese text is segmented with jieba so an unspaced sentence
+        does not collapse into a single word.
+        """
+
+        natural_text = URL_PATTERN.sub(" ", INLINE_CODE_PATTERN.sub(" ", text))
+        english_words = ENGLISH_WORD_PATTERN.findall(natural_text)
+        chinese_text = ENGLISH_WORD_PATTERN.sub(" ", natural_text)
+        chinese_words = [
+            token
+            for token in jieba.lcut(chinese_text, cut_all=False)
+            if CHINESE_TOKEN_PATTERN.search(token)
+        ]
+        return len(english_words) + len(chinese_words)
+
+    @staticmethod
+    def _system_prompt(requires_phonetics: bool) -> str:
+        """Build the response contract for the request's deterministic word count."""
+
+        if requires_phonetics:
+            phonetics_instruction = (
+                "本次原文已由程序判定为 1-5 个词。"
+                "必须在主译下一行输出且只输出一行“音标：...”。"
+                "音标行必须覆盖英文原文和英文主译中出现的每个英文词。"
+                "格式为“音标：word /IPA/；word /IPA/”，单词之间用中文分号分隔。"
+                "音标行必须位于“候选：”之前，且不能使用短横线或项目符号开头。"
+            )
+        else:
+            phonetics_instruction = (
+                "本次原文不在 1-5 个词范围内，不得输出“音标：”行或任何 IPA。"
+            )
+
+        return (
+            "你是一个桌面划词翻译和双语词典助手。"
+            "先判断原文主要语言：主要是英文就翻译成简体中文，"
+            "主要是中文就翻译成自然英文。"
+            "候选译法必须使用目标语言。"
+            "如果原文是单词、固定搭配或短语，必须给 3-6 个常用候选译法；"
+            "如果候选依赖语境，要在括号里用很短的说明标明语境。"
+            "例如中文“标准化的”可给 standardized、normalized、"
+            "canonical、orthonormal（数学/线性代数语境）等候选。"
+            "输出格式：第一行“主译：...”。"
+            f"{phonetics_instruction}"
+            "短词短语最后输出“候选：”并用短横线列出候选；"
+            "每个候选必须独占一行，格式为“- 候选词（可选语境）”，"
+            "候选词放在短横线后的第一段，语境说明只能放在括号里。"
+            "不得把音标追加到候选行。"
+            "句子或段落不要为了凑候选添加同义改写。"
+            "不要输出 Markdown 标题、引号或寒暄。"
+            "保留原文中的代码标识符、URL、数字和必要换行。"
+        )
+
+    def _invoke(self, messages: list[BaseMessage]) -> str:
+        """Invoke Qwen and normalize the response into a non-empty string."""
 
         response = self._llm.invoke(messages)
         content = self._coerce_content(response.content).strip()
         if not content:
             raise TranslationError("模型返回了空译文。")
         return content
+
+    def _retry_with_phonetics(self, messages: list[BaseMessage], content: str) -> str:
+        """Retry once when a short selection omits or misplaces the IPA line."""
+
+        correction = HumanMessage(
+            content=(
+                "上一版缺少合规音标行或顺序错误。请完整重写结果并保持原译义："
+                "第一行是“主译：...”，第二行是“音标：word /IPA/”，"
+                "音标行必须逐一覆盖每个英文词，"
+                "候选区必须位于音标行之后。只输出修正后的完整结果。"
+            )
+        )
+        return self._invoke([*messages, AIMessage(content=content), correction])
+
+    @classmethod
+    def _has_valid_phonetics(cls, content: str, source_text: str) -> bool:
+        """Validate IPA placement and one transcription for every expected English word."""
+
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        main_index = next(
+            (index for index, line in enumerate(lines) if line.startswith(("主译：", "主译:"))),
+            None,
+        )
+        phonetics_indices = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(("音标：", "音标:"))
+        ]
+        candidate_index = next(
+            (index for index, line in enumerate(lines) if line in ("候选：", "候选:")),
+            None,
+        )
+
+        if main_index is None or len(phonetics_indices) != 1:
+            return False
+        phonetics_index = phonetics_indices[0]
+        phonetics_line = lines[phonetics_index]
+        if phonetics_index <= main_index or not IPA_TRANSCRIPTION_PATTERN.search(phonetics_line):
+            return False
+        if candidate_index is not None and phonetics_index >= candidate_index:
+            return False
+
+        expected_words = cls._expected_phonetic_words(source_text, lines[main_index])
+        phonetic_words = {
+            cls._normalized_english_word(match.group(1))
+            for match in PHONETIC_ENTRY_PATTERN.finditer(phonetics_line)
+        }
+        return bool(expected_words) and expected_words.issubset(phonetic_words)
+
+    @classmethod
+    def _expected_phonetic_words(cls, source_text: str, main_line: str) -> set[str]:
+        """Collect every English word present in either the source or main result."""
+
+        source_words = ENGLISH_WORD_PATTERN.findall(
+            URL_PATTERN.sub(" ", INLINE_CODE_PATTERN.sub(" ", source_text))
+        )
+        _, separator, main_translation = main_line.partition("：")
+        if not separator:
+            _, _, main_translation = main_line.partition(":")
+        words = [*source_words, *ENGLISH_WORD_PATTERN.findall(main_translation)]
+        return {cls._normalized_english_word(word) for word in words}
+
+    @staticmethod
+    def _normalized_english_word(word: str) -> str:
+        """Normalize case and apostrophe variants before comparing IPA coverage."""
+
+        return word.casefold().replace("’", "'")
+
+    @staticmethod
+    def _removing_phonetics_line(content: str) -> str:
+        """Enforce the long-selection branch even if the model adds an IPA line."""
+
+        lines: list[str] = []
+        for line in content.splitlines():
+            if line.strip().startswith(("音标：", "音标:")):
+                continue
+            cleaned_line = STANDALONE_TRANSCRIPTION_PATTERN.sub("", line).rstrip()
+            if cleaned_line.strip():
+                lines.append(cleaned_line)
+        return "\n".join(lines).strip()
 
     @staticmethod
     def _coerce_content(content: object) -> str:
