@@ -1,0 +1,4 @@
+interface:
+  display_name: "划词翻译项目维护"
+  short_description: "仅用于本项目的菜单栏、双屏交互、翻译弹窗与可回退安装维护"
+  default_prompt: "使用 $maintain-mac-selected-translator 处理当前项目的修改，先读取对应入口，区分已验证结论与待实测问题；仅在明确要求时构建并替换 App。"
