@@ -11,8 +11,25 @@ final class SleepPreventionController: NSObject {
     private var sleepPreventionActivity: NSObjectProtocol?
     /// The indicator timer runs in common mode so opening a menu does not pause its feedback.
     private var sleepStatusFlashTimer: Timer?
+    private var automaticSleepRestorationTimer: Timer?
+    private let screenLockNotificationCenter: NotificationCenter
     /// Tracks the current pulse phase and resets to fully bright whenever prevention stops.
     private(set) var isSleepStatusLightBright = true
+
+    init(screenLockNotificationCenter: NotificationCenter = DistributedNotificationCenter.default()) {
+        self.screenLockNotificationCenter = screenLockNotificationCenter
+        super.init()
+        screenLockNotificationCenter.addObserver(
+            self,
+            selector: #selector(screenDidLock),
+            name: Notification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+    }
+
+    deinit {
+        screenLockNotificationCenter.removeObserver(self)
+    }
 
     /// Drives both the menu action and the green light from the process activity source of truth.
     var isPreventingSleep: Bool {
@@ -29,6 +46,17 @@ final class SleepPreventionController: NSObject {
         isPreventingSleep ? "保持休眠" : "禁止休眠"
     }
 
+    static func automaticSleepRestorationDate(
+        enabledAt: Date,
+        calendar: Calendar = .current
+    ) -> Date? {
+        guard let cutoff = calendar.date(bySettingHour: 18, minute: 30, second: 0, of: enabledAt),
+              enabledAt < cutoff else {
+            return nil
+        }
+        return cutoff
+    }
+
     /// Switches between allowing normal idle sleep and preventing both idle sleep modes.
     func toggle() {
         if sleepPreventionActivity == nil {
@@ -40,6 +68,8 @@ final class SleepPreventionController: NSObject {
 
     /// Releases the process activity and stops indicator timing during app termination or menu toggle.
     func restoreSystemSleep() {
+        automaticSleepRestorationTimer?.invalidate()
+        automaticSleepRestorationTimer = nil
         if let sleepPreventionActivity {
             ProcessInfo.processInfo.endActivity(sleepPreventionActivity)
             self.sleepPreventionActivity = nil
@@ -48,18 +78,39 @@ final class SleepPreventionController: NSObject {
         onStateChange?()
     }
 
+    @objc private func screenDidLock(_ notification: Notification) {
+        guard isPreventingSleep else {
+            return
+        }
+        restoreSystemSleep()
+    }
+
     /// Starts one process assertion covering both computer and display idle sleep.
     private func preventSystemSleep() {
         guard sleepPreventionActivity == nil else {
             return
         }
 
+        let enabledAt = Date()
         sleepPreventionActivity = ProcessInfo.processInfo.beginActivity(
             options: [.idleSystemSleepDisabled, .idleDisplaySleepDisabled],
             reason: "用户已在划词翻译工具中启用禁止休眠"
         )
         startFlashingSleepStatusLight()
+        scheduleAutomaticSleepRestoration(enabledAt: enabledAt)
         onStateChange?()
+    }
+
+    private func scheduleAutomaticSleepRestoration(enabledAt: Date) {
+        guard let restorationDate = Self.automaticSleepRestorationDate(enabledAt: enabledAt) else {
+            return
+        }
+
+        let timer = Timer(fire: restorationDate, interval: 0, repeats: false) { [weak self] _ in
+            self?.restoreSystemSleep()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        automaticSleepRestorationTimer = timer
     }
 
     /// Starts a low-frequency flash phase consumed by the app's single combined status item.
