@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from .config import Settings
 
 
+
 MAX_PHONETIC_WORDS = 5
 LATIN_LETTERS = "A-Za-zÀ-ÖØ-öø-ÿĀ-ſ\u1e00-\u1eff"
 ENGLISH_WORD_PATTERN = re.compile(
@@ -92,7 +93,9 @@ class TranslatorAgent:
         if requires_phonetics and not self._has_valid_phonetics(content, clean_text):
             content = self._retry_with_phonetics(messages, content)
             if not self._has_valid_phonetics(content, clean_text):
-                raise TranslationError("模型未按要求返回英文 IPA 音标。")
+                # Phonetics enrich the result but must not make a valid
+                # translation fail when the model cannot supply reliable IPA.
+                content = self._removing_phonetics_line(content)
         elif not requires_phonetics:
             content = self._removing_phonetics_line(content)
 
@@ -239,7 +242,7 @@ class TranslatorAgent:
 
     @staticmethod
     def _removing_phonetics_line(content: str) -> str:
-        """Enforce the long-selection branch even if the model adds an IPA line."""
+        """Hide IPA when phonetics are not required or cannot be validated."""
 
         lines: list[str] = []
         for line in content.splitlines():

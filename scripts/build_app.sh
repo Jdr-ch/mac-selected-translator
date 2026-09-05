@@ -8,6 +8,7 @@ CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 INFO_PLIST="${CONTENTS_DIR}/Info.plist"
+APP_ICON="${RESOURCES_DIR}/AppIcon.icns"
 EXECUTABLE_NAME="SelectedTextTranslatorApp"
 BACKEND_URL="${TRANSLATOR_BACKEND_URL:-http://127.0.0.1:${TRANSLATOR_BACKEND_PORT:-8765}}"
 
@@ -17,6 +18,12 @@ rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${ROOT_DIR}/.build/release/${EXECUTABLE_NAME}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+
+ICON_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/selected-text-translator-icon.XXXXXX")"
+trap 'rm -rf "${ICON_WORK_DIR}"' EXIT
+ICONSET_DIR="${ICON_WORK_DIR}/AppIcon.iconset"
+/usr/bin/xcrun swift "${ROOT_DIR}/scripts/generate_app_icon.swift" "${ICONSET_DIR}"
+/usr/bin/iconutil -c icns "${ICONSET_DIR}" -o "${APP_ICON}"
 
 cat > "${INFO_PLIST}" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,6 +38,7 @@ PLIST
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${APP_NAME}" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string ${EXECUTABLE_NAME}" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.local.selected-text-translator" "${INFO_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleInfoDictionaryVersion string 6.0" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleName string ${APP_NAME}" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "${INFO_PLIST}"

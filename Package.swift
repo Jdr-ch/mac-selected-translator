@@ -16,6 +16,11 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "SelectedTextTranslatorApp"
+        ),
+        .testTarget(
+            name: "SelectedTextTranslatorAppTests",
+            dependencies: ["SelectedTextTranslatorApp"],
+            path: "tests/SelectedTextTranslatorAppTests"
         )
     ]
 )

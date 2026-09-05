@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/scripts/load_env.sh"
-load_env_if_unset "${ROOT_DIR}/.env"
+load_translator_configuration "${ROOT_DIR}/.env"
 
 if [[ ! -x "${ROOT_DIR}/.venv/bin/python" ]]; then
   echo "缺少虚拟环境，请先运行：${ROOT_DIR}/scripts/setup.sh" >&2

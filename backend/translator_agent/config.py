@@ -59,7 +59,8 @@ class Settings:
         api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")
         if not api_key or api_key.strip().lower() in PLACEHOLDER_API_KEYS:
             raise ConfigError(
-                "缺少 DASHSCOPE_API_KEY。请先复制 .env.example 为 .env 并填入你的 API Key。"
+                "缺少 DASHSCOPE_API_KEY。请运行 scripts/store_api_key_in_keychain.sh，"
+                "或在 .env 中填入你的 API Key。"
             )
 
         port_raw = os.getenv("TRANSLATOR_BACKEND_PORT", "8765")

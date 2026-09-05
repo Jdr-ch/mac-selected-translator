@@ -20,24 +20,42 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 ./scripts/setup.sh
 ```
 
-然后编辑 `.env`：
+推荐把 API Key 保存到 macOS 钥匙串，避免在 `.env` 中明文保存：
 
 ```bash
-DASHSCOPE_API_KEY=你的 DashScope 或 Model Studio API Key
+export DASHSCOPE_API_KEY=你的APIKey
+./scripts/store_api_key_in_keychain.sh
+```
+
+## iPhone 定位
+
+菜单栏下拉菜单中的 `iPhone 定位` 可以设置或恢复 iOS 17+ 真机的开发者模拟定位。设备发现和定位模拟通过 `pymobiledevice3` 与 macOS 原生设备隧道完成，运行时不依赖完整 Xcode；重新执行 `./scripts/setup.sh` 可安装新增依赖。
+
+`获取当前定位` 会启动已安装在手机上的 `LocationSimulator` 伴生 App，由它取得用户授权后的真实 `CLLocation`，再通过 USB 读取经纬度。伴生 App 的首次签名和安装仍需要 Xcode：
+
+```text
+/Users/jiangdengrui/Documents/Codex/2026-09-01/pin/outputs/LocationSimulator
+```
+
+在 Xcode 中选择已连接的 iPhone 运行一次，并在手机上允许定位。之后 Mac 面板可以自动启动伴生 App 并读取当前坐标。
+
+然后编辑 `.env` 中的非敏感配置：
+
+```bash
 QWEN_MODEL=qwen3.7-max
 DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
 如果你的阿里云账号使用 Model Studio 工作空间 endpoint，把 `DASHSCOPE_BASE_URL` 改成控制台给出的完整 OpenAI-compatible `/v1` 地址。
 
-也可以完全不把 API Key 写进 `.env`，直接从当前 shell 环境读取：
+开发时也可以只从当前 shell 环境读取：
 
 ```bash
-export DASHSCOPE_API_KEY=你的 DashScope 或 Model Studio API Key
+export DASHSCOPE_API_KEY=你的APIKey
 ./scripts/run_dev.sh
 ```
 
-启动脚本会优先使用已有环境变量，`.env` 只用于补充未设置的本地默认值。
+启动脚本按“当前进程环境 > macOS 钥匙串 > `.env`”的顺序读取 API Key；`.env` 只用于最后兜底和补充非敏感配置。
 
 ## 启动
 
@@ -62,11 +80,13 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 ./scripts/open_app.sh
 ```
 
-这个 App 会自动检查并启动本地 Python 翻译服务。Finder 双击启动时通常不会继承终端里的 `export DASHSCOPE_API_KEY=...`，所以双击模式建议把真实 API Key 写到 `.env`，或者先设置到 macOS launchd 环境：
+这个 App 会自动检查并启动本地 Python 翻译服务。Finder 双击启动时通常不会继承终端里的 `export DASHSCOPE_API_KEY=...`，因此会自动从 macOS 钥匙串读取已保存的 Key：
 
 ```bash
-launchctl setenv DASHSCOPE_API_KEY 你的 DashScope 或 Model Studio API Key
+./scripts/store_api_key_in_keychain.sh
 ```
+
+钥匙串内容会跨注销和重启保留。API Key 失效或轮换后，重新运行该脚本即可覆盖旧值。
 
 ### 开发模式
 
@@ -147,3 +167,10 @@ TRANSLATOR_BACKEND_URL=http://127.0.0.1:8766
 ### Qwen 返回模型或 endpoint 错误
 
 检查 `QWEN_MODEL`、`DASHSCOPE_BASE_URL` 和 API Key 是否属于同一个阿里云账号/工作空间。`qwen3.7-max` 若在你的账号下要求工作空间 endpoint，需要使用控制台提供的 workspace OpenAI-compatible `/v1` 地址。
+
+更新 API Key：
+
+```bash
+export DASHSCOPE_API_KEY=新的APIKey
+./scripts/store_api_key_in_keychain.sh
+```

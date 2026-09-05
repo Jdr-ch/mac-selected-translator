@@ -16,7 +16,7 @@ final class BackendSupervisor {
     /// The menu-bar app can now be launched as a normal `.app`, so there may be
     /// no terminal session that started `scripts/run_backend.sh` first. This
     /// method keeps that startup responsibility inside the app while still
-    /// reusing the existing Python backend and `.env` loading behavior.
+    /// reusing the existing Python backend and configuration loading behavior.
     func ensureBackendRunning() async throws {
         if await isBackendHealthy() {
             return
@@ -131,7 +131,7 @@ final class BackendSupervisor {
             if let ownedProcess, !ownedProcess.isRunning {
                 self.ownedProcess = nil
                 throw TranslatorAppError.backendStartupFailed(
-                    "本地翻译服务提前退出，请检查 .env、环境变量中的 DASHSCOPE_API_KEY，或查看 /tmp/selected-text-translator-backend.log。"
+                    "本地翻译服务提前退出，请检查钥匙串、.env 或环境变量中的 DASHSCOPE_API_KEY，或查看 /tmp/selected-text-translator-backend.log。"
                 )
             }
 

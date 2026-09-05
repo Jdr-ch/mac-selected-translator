@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from backend.translator_agent.agent import TranslationError, TranslatorAgent
+from backend.translator_agent.agent import TranslatorAgent
 
 
 class StubLLM:
@@ -132,11 +132,39 @@ class TranslatorAgentPhoneticsTests(unittest.TestCase):
         self.assertIn("five /faɪv/", result)
         self.assertEqual(len(llm.calls), 2)
 
-    def test_short_selection_fails_after_two_invalid_responses(self) -> None:
-        agent, _ = self.make_agent(["主译：你好", "主译：你好"])
+    def test_short_selection_keeps_translation_when_phonetics_are_unavailable(self) -> None:
+        agent, llm = self.make_agent(
+            [
+                "主译：你好\n候选：\n- 你好（日常问候）",
+                "主译：你好\n候选：\n- 你好（日常问候）",
+            ]
+        )
 
-        with self.assertRaisesRegex(TranslationError, "IPA 音标"):
-            agent.translate("hello")
+        result = agent.translate("hello")
+
+        self.assertEqual(result, "主译：你好\n候选：\n- 你好（日常问候）")
+        self.assertNotIn("音标：", result)
+        self.assertEqual(len(llm.calls), 2)
+
+    def test_short_selection_hides_incomplete_phonetics_after_retry(self) -> None:
+        agent, llm = self.make_agent(
+            [
+                "主译：一二三四五\n音标：one /wʌn/",
+                "主译：一二三四五\n"
+                "音标：one /wʌn/；two /tuː/\n"
+                "候选：\n"
+                "- 一二三四五（数字序列）",
+            ]
+        )
+
+        result = agent.translate("one two three four five")
+
+        self.assertEqual(
+            result,
+            "主译：一二三四五\n候选：\n- 一二三四五（数字序列）",
+        )
+        self.assertNotIn("/wʌn/", result)
+        self.assertEqual(len(llm.calls), 2)
 
     def test_long_selection_removes_an_unexpected_phonetics_line(self) -> None:
         agent, llm = self.make_agent(

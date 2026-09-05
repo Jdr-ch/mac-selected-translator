@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -6,19 +7,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backendSupervisor: BackendSupervisor
     private let selectionReader = AccessibilitySelectionReader()
     private let floatingPanel = FloatingPanelController()
+    private let windowLayoutController = WindowLayoutController()
+    private let sleepPreventionController = SleepPreventionController()
+    private let iphoneLocationWindowController: IPhoneLocationWindowController
     private var hotkeyMonitor: HotkeyMonitor?
     private var statusItem: NSStatusItem?
-    private var isTranslating = false
+    /// Updates the standard status-button image so AppKit can reuse it on every display's menu bar.
+    private var statusIconAnimator: StatusItemIconAnimator?
+    /// Intercepts only the green-light region before the status item's native menu begins tracking.
+    private var statusItemMouseMonitor: Any?
+    /// Retained so the status-menu label follows both the menu toggle and the green indicator.
+    private var sleepMenuItem: NSMenuItem?
+    /// Drives the faster icon rhythm for the lifetime of one translation request.
+    private var isTranslating = false {
+        didSet {
+            statusIconAnimator?.animationState = isTranslating ? .translating : .idle
+        }
+    }
 
     override init() {
         let configuration = AppConfiguration()
         self.backendClient = BackendClient(configuration: configuration)
         self.backendSupervisor = BackendSupervisor(configuration: configuration)
+        self.iphoneLocationWindowController = IPhoneLocationWindowController(
+            projectRoot: configuration.projectRoot
+        )
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
+        registerLaunchAtLoginIfNeeded()
         promptForAccessibilityIfNeeded()
         warmUpBackend()
 
@@ -30,24 +49,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
+        statusIconAnimator?.stop()
+        if let statusItemMouseMonitor {
+            NSEvent.removeMonitor(statusItemMouseMonitor)
+        }
+        iphoneLocationWindowController.shutdown()
+        sleepPreventionController.restoreSystemSleep()
         backendSupervisor.terminateOwnedBackend()
     }
 
     private func setupStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "译"
-        item.button?.toolTip = "划词翻译：按 Option+Tab"
+        let statusBar = NSStatusBar.system
+        let item = statusBar.statusItem(
+            withLength: StatusItemVisualStyle.itemLength(statusBarThickness: statusBar.thickness)
+        )
+        if let button = item.button {
+            button.title = ""
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleNone
+            button.toolTip = "划词翻译：按 Option+Tab"
+            button.setAccessibilityLabel("划词翻译")
+            setupStatusIcon(in: button, statusBarThickness: statusBar.thickness)
+        }
 
         let menu = NSMenu()
         menu.addItem(makeMenuItem(title: "翻译当前选中文字", action: #selector(translateFromMenu)))
+        menu.addItem(.separator())
+        menu.addItem(makeMenuItem(title: "整理", action: #selector(organizeWindows)))
+        menu.addItem(makeMenuItem(title: "对齐", action: #selector(alignWindows)))
+        let sleepMenuItem = makeMenuItem(
+            title: sleepPreventionController.actionTitle,
+            action: #selector(toggleSleepPrevention)
+        )
+        menu.addItem(sleepMenuItem)
+        self.sleepMenuItem = sleepMenuItem
+        sleepPreventionController.onStateChange = { [weak self] in
+            self?.updateSleepPreventionUI()
+        }
+        sleepPreventionController.onIndicatorChange = { [weak self] in
+            self?.updateStatusItemAppearance()
+        }
+        menu.addItem(.separator())
+        menu.addItem(makeMenuItem(title: "iPhone 定位", action: #selector(showIPhoneLocation)))
+        menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
         menu.addItem(makeMenuItem(title: "查看快捷键状态", action: #selector(showHotkeyStatus)))
         menu.addItem(makeMenuItem(title: "检查辅助功能权限", action: #selector(checkAccessibilityPermission)))
         menu.addItem(makeMenuItem(title: "检查/启动本地翻译服务", action: #selector(checkBackendService)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
-        item.menu = menu
         statusItem = item
+        item.menu = menu
+        installStatusItemMouseMonitor()
+        updateSleepPreventionUI()
+    }
+
+    /// Starts frame rendering into the standard status-button image used by every menu-bar context.
+    private func setupStatusIcon(in statusButton: NSStatusBarButton, statusBarThickness: CGFloat) {
+        let animator = StatusItemIconAnimator(
+            button: statusButton,
+            statusBarThickness: statusBarThickness
+        )
+        animator.start()
+        statusIconAnimator = animator
+    }
+
+    /// Lets native menu tracking handle icon clicks while consuming only active green-light clicks.
+    private func installStatusItemMouseMonitor() {
+        statusItemMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+            [weak self] event in
+            guard let self,
+                  self.sleepPreventionController.isPreventingSleep,
+                  let button = self.statusItem?.button,
+                  event.window === button.window else {
+                return event
+            }
+
+            let point = button.convert(event.locationInWindow, from: nil)
+            guard button.bounds.contains(point),
+                  StatusItemVisualStyle.hitTarget(
+                    at: point,
+                    in: button.bounds.size,
+                    isPreventingSleep: true
+                  ) == .sleepIndicator else {
+                return event
+            }
+
+            self.restoreSleepFromStatusIndicator()
+            return nil
+        }
+    }
+
+    /// Registers only a packaged app so development executables never become persistent login items.
+    private func registerLaunchAtLoginIfNeeded() {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            return
+        }
+
+        let service = SMAppService.mainApp
+        guard service.status == .notRegistered else {
+            return
+        }
+
+        do {
+            try service.register()
+        } catch {
+            NSLog("Unable to register launch at login: %@", error.localizedDescription)
+        }
+    }
+
+    /// Keeps the menu action and the combined status-item presentation synchronized.
+    private func updateSleepPreventionUI() {
+        sleepMenuItem?.title = sleepPreventionController.actionTitle
+        updateStatusItemAppearance()
+    }
+
+    /// Places the pulsing green light directly left of the icon inside the stable status-item slot.
+    private func updateStatusItemAppearance() {
+        guard let button = statusItem?.button else {
+            return
+        }
+
+        let isPreventingSleep = sleepPreventionController.isPreventingSleep
+        statusIconAnimator?.isPreventingSleep = isPreventingSleep
+        statusIconAnimator?.isSleepIndicatorBright = sleepPreventionController.isSleepStatusLightBright
+
+        if isPreventingSleep {
+            button.toolTip = "划词翻译；禁止休眠中：按 Option+Tab"
+            button.setAccessibilityLabel("划词翻译，禁止休眠中")
+        } else {
+            button.toolTip = "划词翻译：按 Option+Tab"
+            button.setAccessibilityLabel("划词翻译")
+        }
     }
 
     /// Creates status-menu commands that route directly to the app delegate.
@@ -130,6 +263,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func translateFromMenu() {
         handleTranslateShortcut()
+    }
+
+    /// Repositions visible windows on the screen where the status menu was opened.
+    @objc private func organizeWindows() {
+        performWindowLayout(windowLayoutController.organizeCurrentScreen)
+    }
+
+    /// Resizes and places visible windows into the four requested screen anchors.
+    @objc private func alignWindows() {
+        performWindowLayout(windowLayoutController.alignCurrentScreen)
+    }
+
+    /// Toggles the process-level sleep assertion and updates the menu action title.
+    @objc private func toggleSleepPrevention() {
+        sleepPreventionController.toggle()
+    }
+
+    /// Restores normal sleep immediately when the user clicks the green status light.
+    @objc private func restoreSleepFromStatusIndicator() {
+        guard sleepPreventionController.isPreventingSleep else {
+            return
+        }
+        sleepPreventionController.restoreSystemSleep()
+    }
+
+    /// Runs one menu-triggered layout command and surfaces permission or window-selection failures.
+    private func performWindowLayout(_ action: () throws -> Void) {
+        do {
+            try action()
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            floatingPanel.showError(message)
+        }
+    }
+
+    /// Opens the retained location panel so its device and simulation state survives menu dismissal.
+    @objc private func showIPhoneLocation() {
+        iphoneLocationWindowController.showWindow()
     }
 
     /// Shows the floating panel without reading selection or calling the model.

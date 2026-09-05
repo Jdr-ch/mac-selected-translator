@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/scripts/load_env.sh"
-load_env_if_unset "${ROOT_DIR}/.env"
+load_translator_configuration "${ROOT_DIR}/.env"
 
 export TRANSLATOR_PROJECT_ROOT="${TRANSLATOR_PROJECT_ROOT:-${ROOT_DIR}}"
 
@@ -25,7 +25,7 @@ if ! curl -fsS "${BACKEND_URL}/health" >/dev/null 2>&1; then
 
     if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
       wait "${BACKEND_PID}" || true
-      echo "本地翻译服务启动失败，请检查 .env 中的 DASHSCOPE_API_KEY 和端口配置。" >&2
+      echo "本地翻译服务启动失败，请检查钥匙串或 .env 中的 DASHSCOPE_API_KEY 和端口配置。" >&2
       exit 1
     fi
 
