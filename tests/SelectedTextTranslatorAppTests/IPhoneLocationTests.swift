@@ -33,4 +33,20 @@ struct IPhoneLocationTests {
         #expect(devices[0].id == "test-udid")
         #expect(devices[0].isReadyForDeveloperLocation)
     }
+
+    @Test
+    func savedLocationStoreRoundTripsPresets() throws {
+        let suiteName = "IPhoneLocationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = IPhoneLocationStore(defaults: defaults)
+        let location = SavedIPhoneLocation(
+            name: "公司",
+            coordinate: try IPhoneCoordinate.parse(latitude: "31.2304", longitude: "121.4737")
+        )
+
+        store.save([location])
+
+        #expect(store.load() == [location])
+    }
 }

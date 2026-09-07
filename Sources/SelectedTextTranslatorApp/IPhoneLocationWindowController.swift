@@ -4,6 +4,7 @@ import AppKit
 final class IPhoneLocationWindowController: NSWindowController {
     private let deviceDiscovery: IPhoneDeviceDiscoveryService
     private let locationService: IPhoneLocationService
+    private let locationStore = IPhoneLocationStore()
     /// Mirrors the popup order so its selected index resolves to the same device identity.
     private var devices: [ConnectedIPhone] = []
     /// Blocks duplicate refreshes while the one-shot usbmux discovery process is running.
@@ -20,25 +21,35 @@ final class IPhoneLocationWindowController: NSWindowController {
     private let currentLocationButton = NSButton(title: "获取当前定位", target: nil, action: nil)
     private let restoreButton = NSButton(title: "恢复真实定位", target: nil, action: nil)
     private let setLocationButton = NSButton(title: "使用此定位", target: nil, action: nil)
+    private let savedLocationNameField = NSTextField(string: "")
+    private let saveLocationButton = NSButton(title: "保存常用定位", target: nil, action: nil)
+    private let savedLocationsStack = NSStackView()
+    private let savedLocationsScrollView = NSScrollView()
+    private var savedLocations: [SavedIPhoneLocation] = []
 
     init(projectRoot: URL?) {
         let paths = IPhoneLocationPaths(projectRoot: projectRoot)
         self.deviceDiscovery = IPhoneDeviceDiscoveryService(paths: paths)
         self.locationService = IPhoneLocationService(paths: paths)
 
+        let contentSize = NSSize(width: 620, height: 560)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 340),
+            contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "iPhone 定位"
         window.isReleasedWhenClosed = false
+        // Keep Auto Layout's fitting size from collapsing the tool window around its controls.
+        window.contentMinSize = contentSize
         super.init(window: window)
 
         configureControls()
         layoutControls()
         bindState()
+        savedLocations = locationStore.load()
+        reloadSavedLocations()
     }
 
     @available(*, unavailable)
@@ -104,6 +115,25 @@ final class IPhoneLocationWindowController: NSWindowController {
         setLocationButton.keyEquivalent = "\r"
         setLocationButton.target = self
         setLocationButton.action = #selector(startSimulation)
+
+        savedLocationNameField.placeholderString = "地名，例如：公司"
+        saveLocationButton.image = NSImage(systemSymbolName: "bookmark", accessibilityDescription: nil)
+        saveLocationButton.imagePosition = .imageLeading
+        saveLocationButton.bezelStyle = .rounded
+        saveLocationButton.target = self
+        saveLocationButton.action = #selector(saveCurrentLocation)
+
+        // The scroll document follows the viewport width, not its initial zero-sized frame.
+        savedLocationsStack.translatesAutoresizingMaskIntoConstraints = false
+        savedLocationsStack.orientation = .vertical
+        savedLocationsStack.alignment = .leading
+        savedLocationsStack.spacing = 6
+        savedLocationsStack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        savedLocationsScrollView.translatesAutoresizingMaskIntoConstraints = false
+        savedLocationsScrollView.borderType = .bezelBorder
+        savedLocationsScrollView.hasVerticalScroller = true
+        savedLocationsScrollView.autohidesScrollers = true
+        savedLocationsScrollView.documentView = savedLocationsStack
     }
 
     /// Keeps device selection, coordinate inputs, status, and actions in fixed scan order.
@@ -140,7 +170,20 @@ final class IPhoneLocationWindowController: NSWindowController {
         actionRow.distribution = .fillEqually
         actionRow.spacing = 10
 
-        let contentStack = NSStackView(views: [grid, statusRow, actionRow])
+        let savedLocationEditor = NSStackView(views: [savedLocationNameField, saveLocationButton])
+        savedLocationEditor.orientation = .horizontal
+        savedLocationEditor.spacing = 10
+        savedLocationNameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        saveLocationButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let savedLocationsTitle = NSTextField(labelWithString: "常用定位")
+        savedLocationsTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let savedLocationsSection = NSStackView(views: [savedLocationsTitle, savedLocationEditor, savedLocationsScrollView])
+        savedLocationsSection.orientation = .vertical
+        savedLocationsSection.alignment = .leading
+        savedLocationsSection.spacing = 8
+
+        let contentStack = NSStackView(views: [grid, statusRow, actionRow, savedLocationsSection])
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
@@ -154,6 +197,13 @@ final class IPhoneLocationWindowController: NSWindowController {
             grid.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             actionRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            savedLocationsSection.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            savedLocationEditor.widthAnchor.constraint(equalTo: savedLocationsSection.widthAnchor),
+            savedLocationsScrollView.widthAnchor.constraint(equalTo: savedLocationsSection.widthAnchor),
+            savedLocationsScrollView.heightAnchor.constraint(equalToConstant: 150),
+            savedLocationsStack.leadingAnchor.constraint(equalTo: savedLocationsScrollView.contentView.leadingAnchor),
+            savedLocationsStack.topAnchor.constraint(equalTo: savedLocationsScrollView.contentView.topAnchor),
+            savedLocationsStack.widthAnchor.constraint(equalTo: savedLocationsScrollView.contentView.widthAnchor),
             latitudeField.heightAnchor.constraint(equalToConstant: 28),
             longitudeField.heightAnchor.constraint(equalToConstant: 28),
             actionRow.heightAnchor.constraint(equalToConstant: 34)
@@ -170,6 +220,99 @@ final class IPhoneLocationWindowController: NSWindowController {
             self?.updateControls()
         }
         updateControls()
+    }
+
+    /// Adds the current coordinate to the persisted presets after validating both fields.
+    @objc private func saveCurrentLocation() {
+        let name = savedLocationNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            showStatus("请输入常用定位的地名。", color: .systemRed)
+            return
+        }
+        do {
+            let coordinate = try IPhoneCoordinate.parse(
+                latitude: latitudeField.stringValue,
+                longitude: longitudeField.stringValue
+            )
+            savedLocations.append(SavedIPhoneLocation(name: name, coordinate: coordinate))
+            locationStore.save(savedLocations)
+            savedLocationNameField.stringValue = ""
+            reloadSavedLocations()
+            showStatus("已保存常用定位：\\(name)。", color: .systemGreen)
+        } catch {
+            showStatus(error.localizedDescription, color: .systemRed)
+        }
+    }
+
+    /// Rebuilds the compact preset list so each row always carries its own stable identifier.
+    private func reloadSavedLocations() {
+        savedLocationsStack.arrangedSubviews.forEach { view in
+            savedLocationsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        if savedLocations.isEmpty {
+            let emptyLabel = NSTextField(labelWithString: "暂无常用定位，请输入地名后保存。")
+            emptyLabel.textColor = .secondaryLabelColor
+            savedLocationsStack.addArrangedSubview(emptyLabel)
+            return
+        }
+        for location in savedLocations {
+            let nameLabel = NSTextField(labelWithString: location.name)
+            nameLabel.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+            let coordinateLabel = NSTextField(labelWithString: location.coordinate.displayText)
+            coordinateLabel.textColor = .secondaryLabelColor
+            let details = NSStackView(views: [nameLabel, coordinateLabel])
+            details.orientation = .vertical
+            details.alignment = .leading
+            details.spacing = 2
+
+            let useButton = NSButton(title: "使用", target: self, action: #selector(useSavedLocation(_:)))
+            useButton.image = NSImage(systemSymbolName: "arrow.down.left", accessibilityDescription: nil)
+            useButton.imagePosition = .imageLeading
+            useButton.bezelStyle = .rounded
+            useButton.identifier = NSUserInterfaceItemIdentifier(location.id.uuidString)
+
+            let deleteButton = NSButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "删除常用定位")!, target: self, action: #selector(deleteSavedLocation(_:)))
+            deleteButton.imagePosition = .imageOnly
+            deleteButton.bezelStyle = .texturedRounded
+            deleteButton.toolTip = "删除常用定位"
+            deleteButton.identifier = NSUserInterfaceItemIdentifier(location.id.uuidString)
+
+            let row = NSStackView(views: [details, useButton, deleteButton])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            details.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            useButton.setContentHuggingPriority(.required, for: .horizontal)
+            deleteButton.setContentHuggingPriority(.required, for: .horizontal)
+            savedLocationsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: savedLocationsStack.widthAnchor, constant: -16).isActive = true
+        }
+    }
+
+    @objc private func useSavedLocation(_ sender: NSButton) {
+        guard
+            let idString = sender.identifier?.rawValue,
+            let id = UUID(uuidString: idString),
+            let location = savedLocations.first(where: { $0.id == id })
+        else {
+            return
+        }
+        latitudeField.stringValue = location.coordinate.latitudeInputText
+        longitudeField.stringValue = location.coordinate.longitudeInputText
+        showStatus("已载入常用定位：\\(location.name)。", color: .systemBlue)
+    }
+
+    @objc private func deleteSavedLocation(_ sender: NSButton) {
+        guard
+            let idString = sender.identifier?.rawValue,
+            let id = UUID(uuidString: idString)
+        else {
+            return
+        }
+        savedLocations.removeAll { $0.id == id }
+        locationStore.save(savedLocations)
+        reloadSavedLocations()
     }
 
     /// Refreshes paired USB devices and preserves the previous UDID when it is still present.

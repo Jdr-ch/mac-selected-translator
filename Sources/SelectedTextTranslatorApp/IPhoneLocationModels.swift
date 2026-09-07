@@ -1,6 +1,6 @@
 import Foundation
 
-struct IPhoneCoordinate: Equatable {
+struct IPhoneCoordinate: Codable, Equatable {
     let latitude: Double
     let longitude: Double
 
@@ -39,6 +39,45 @@ struct IPhoneCoordinate: Equatable {
 
     var longitudeInputText: String {
         String(format: "%.8f", locale: Locale(identifier: "en_US_POSIX"), longitude)
+    }
+}
+
+struct SavedIPhoneLocation: Codable, Equatable, Identifiable {
+    let id: UUID
+    var name: String
+    let coordinate: IPhoneCoordinate
+
+    init(id: UUID = UUID(), name: String, coordinate: IPhoneCoordinate) {
+        self.id = id
+        self.name = name
+        self.coordinate = coordinate
+    }
+}
+
+/// Stores user-created location presets independently from the active device session.
+final class IPhoneLocationStore {
+    private static let userDefaultsKey = "iphone.savedLocations"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load() -> [SavedIPhoneLocation] {
+        guard
+            let data = defaults.data(forKey: Self.userDefaultsKey),
+            let locations = try? JSONDecoder().decode([SavedIPhoneLocation].self, from: data)
+        else {
+            return []
+        }
+        return locations
+    }
+
+    func save(_ locations: [SavedIPhoneLocation]) {
+        guard let data = try? JSONEncoder().encode(locations) else {
+            return
+        }
+        defaults.set(data, forKey: Self.userDefaultsKey)
     }
 }
 
