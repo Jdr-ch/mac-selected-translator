@@ -18,6 +18,8 @@ rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${ROOT_DIR}/.build/release/${EXECUTABLE_NAME}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+# Keep the local renderer available without depending on SwiftPM's development build directory.
+ditto "${ROOT_DIR}/Sources/SelectedTextTranslatorApp/Resources/Flowchart" "${RESOURCES_DIR}/Flowchart"
 
 ICON_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/selected-text-translator-icon.XXXXXX")"
 trap 'rm -rf "${ICON_WORK_DIR}"' EXIT

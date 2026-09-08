@@ -10,6 +10,7 @@ from typing import Any
 
 from .agent import TranslationError, TranslatorAgent
 from .config import ConfigError, Settings
+from .flowchart import FlowchartAgent, FlowchartError
 
 
 class TranslatorRequestHandler(BaseHTTPRequestHandler):
@@ -22,6 +23,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
 
     agent: TranslatorAgent
     settings: Settings
+    flowchart_agent: FlowchartAgent
 
     def do_GET(self) -> None:
         """Expose a health endpoint for shell scripts and the macOS app."""
@@ -32,7 +34,11 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        """Route translation and same-language polishing through separate model policies."""
+        """Route flowcharts, translation, and polishing through separate model policies."""
+
+        if self.path == "/flowchart":
+            self._generate_flowchart()
+            return
 
         if self.path not in ("/translate", "/polish"):
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
@@ -58,6 +64,20 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"{operation}请求失败：{exc}"}, HTTPStatus.BAD_GATEWAY)
             return
 
+        self._send_json(result)
+
+    def _generate_flowchart(self) -> None:
+        """Keep one-shot diagram generation independent of translation's response policy."""
+        try:
+            payload = self._read_json_body()
+            result = self.flowchart_agent.generate(payload.get("text"), payload.get("model"))
+        except (ValueError, FlowchartError) as exc:
+            self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        except Exception:  # Provider errors may include request details; do not expose credentials.
+            self._send_json({"error": "流程解析请求失败，请检查模型名称、服务连接和密钥。"},
+                            HTTPStatus.BAD_GATEWAY)
+            return
         self._send_json(result)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -114,6 +134,7 @@ def build_server(settings: Settings) -> ThreadingHTTPServer:
 
     TranslatorRequestHandler.settings = settings
     TranslatorRequestHandler.agent = TranslatorAgent(settings)
+    TranslatorRequestHandler.flowchart_agent = FlowchartAgent(settings)
     return ThreadingHTTPServer((settings.host, settings.port), TranslatorRequestHandler)
 
 

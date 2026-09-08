@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let windowLayoutController = WindowLayoutController()
     private let sleepPreventionController = SleepPreventionController()
     private let iphoneLocationWindowController: IPhoneLocationWindowController
+    /// Created on first use so the diagram renderer does not delay the menu-bar app's startup.
+    private var flowchartWindowController: FlowchartWindowController?
     private let polishWindowController: ContentPolishWindowController
     /// Captured before native menu tracking changes focus; never infer the source from the new panel.
     private var menuSourceApplication: NSRunningApplication?
@@ -65,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSEvent.removeMonitor(statusItemMouseMonitor)
         }
         iphoneLocationWindowController.shutdown()
+        flowchartWindowController?.shutdown()
         polishSelectionTask?.cancel()
         polishWindowController.session.cancel()
         sleepPreventionController.restoreSystemSleep()
@@ -105,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "iPhone 定位", action: #selector(showIPhoneLocation)))
+        menu.addItem(makeMenuItem(title: "生成流程图", action: #selector(showFlowchart)))
         menu.addItem(makeMenuItem(title: "内容润色", action: #selector(showContentPolish)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
@@ -320,6 +324,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         menuSourceApplication = NSWorkspace.shared.frontmostApplication
+    }
+
+    /// Opens a retained editor instead of starting another app or replacing translation state.
+    @objc private func showFlowchart() {
+        if flowchartWindowController == nil {
+            flowchartWindowController = FlowchartWindowController { [weak self] in
+                guard let self else { throw CancellationError() }
+                try await self.backendSupervisor.ensureBackendRunning()
+            }
+        }
+        flowchartWindowController?.showWindow()
     }
 
     /// Reads the source before opening the centered window, then automatically submits that selection.

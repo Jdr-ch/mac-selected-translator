@@ -15,7 +15,8 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "SelectedTextTranslatorApp"
+            name: "SelectedTextTranslatorApp",
+            resources: [.copy("Resources/Flowchart")]
         ),
         .testTarget(
             name: "SelectedTextTranslatorAppTests",

@@ -90,6 +90,9 @@ final class BackendSupervisor {
 
         var environment = ProcessInfo.processInfo.environment
         environment["TRANSLATOR_PROJECT_ROOT"] = projectRoot.path
+        // Finder-launched worktree builds must start Python on the same endpoint encoded in the app.
+        environment["TRANSLATOR_BACKEND_HOST"] = configuration.backendBaseURL.host
+        environment["TRANSLATOR_BACKEND_PORT"] = String(configuration.backendBaseURL.port ?? 8765)
         process.environment = environment
 
         let logHandle = try openBackendLogHandle()

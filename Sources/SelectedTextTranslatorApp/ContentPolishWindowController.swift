@@ -370,17 +370,7 @@ private final class ContentPolishPanel: NSPanel {
 
     /// This menu-bar app has no Edit menu, so route standard editing shortcuts to the field editor.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection([.command, .option, .control])
-        if modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
-            let actions = ["c": "copy:", "x": "cut:", "v": "paste:", "a": "selectAll:"]
-            if let action = actions[key], let responder = firstResponder {
-                return NSApp.sendAction(Selector(action), to: responder, from: self)
-            }
-            if key == "z", let manager = firstResponder?.undoManager {
-                if event.modifierFlags.contains(.shift) { manager.redo() } else { manager.undo() }
-                return true
-            }
-        }
+        if TextEditingShortcuts.perform(with: event, in: self) { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
