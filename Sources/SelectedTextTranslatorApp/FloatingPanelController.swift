@@ -2,8 +2,8 @@ import AppKit
 
 /// Keeps candidate rows compact while allowing wrapped context copy to grow naturally.
 enum CandidateRowLayout {
-    static let minimumHeight: CGFloat = 30
-    static let verticalInset: CGFloat = 3
+    static let minimumHeight: CGFloat = 26
+    static let verticalInset: CGFloat = 2
 
     /// Adds balanced vertical padding around the measured candidate text.
     static func preferredHeight(textHeight: CGFloat) -> CGFloat {
@@ -16,8 +16,9 @@ final class FloatingPanelController: NSObject {
     private enum Metrics {
         static let panelWidth: CGFloat = 420
         static let maximumPanelHeight: CGFloat = 360
-        static let headerHeight: CGFloat = 50
+        static let headerHeight: CGFloat = 38
         static let contentPadding: CGFloat = 18
+        static let verticalPadding: CGFloat = 10
         static let contentWidth = panelWidth - contentPadding * 2
     }
 
@@ -35,6 +36,10 @@ final class FloatingPanelController: NSObject {
     private let headerSeparator = NSBox()
     private let scrollView = NSScrollView()
     private let bodyView = FlippedView()
+    private let history = TranslationHistory()
+    private let historyView = TranslationHistoryView(frame: .zero)
+    /// Identifies the displayed successful selection; loading and diagnostic messages have no selected entry.
+    private var selectedSourceText: String?
     private var progressIndicator: NSProgressIndicator?
     private var autoHideTimer: Timer?
     private var outsideClickMonitor: Any?
@@ -94,17 +99,26 @@ final class FloatingPanelController: NSObject {
         containerView.addSubview(closeButton)
         containerView.addSubview(headerSeparator)
         containerView.addSubview(scrollView)
+        containerView.addSubview(historyView)
+        historyView.onSelect = { [weak self] entry in
+            self?.showHistoryEntry(entry)
+        }
         panel.contentView = containerView
         startOutsideClickMonitor()
     }
 
     /// Shows progress until the current selection or backend request advances to a terminal state.
     func showLoading(_ message: String) {
+        selectedSourceText = nil
         show(title: "划词翻译", state: .loading(message: message), autoHideAfter: nil)
     }
 
-    /// Shows the translated sections and exposes every candidate row as a copy action.
-    func showResult(_ translation: String) {
+    /// Records successful selections only; diagnostic callers omit sourceText and never enter history.
+    func showResult(_ translation: String, sourceText: String? = nil) {
+        selectedSourceText = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sourceText {
+            history.record(sourceText: sourceText, translation: translation)
+        }
         show(
             title: "翻译结果",
             state: .result(TranslationResultPresentation(response: translation)),
@@ -114,11 +128,17 @@ final class FloatingPanelController: NSObject {
 
     /// Shows the actionable failure reason briefly before dismissing the transient panel.
     func showError(_ message: String) {
+        selectedSourceText = nil
         show(title: "翻译失败", state: .error(message: message), autoHideAfter: 8)
     }
 
     /// Rebuilds only the state body while keeping the header and scroll boundary stable.
-    private func show(title: String, state: PopupState, autoHideAfter seconds: TimeInterval?) {
+    private func show(
+        title: String,
+        state: PopupState,
+        autoHideAfter seconds: TimeInterval?,
+        followsMouse: Bool = true
+    ) {
         autoHideTimer?.invalidate()
         progressIndicator?.stopAnimation(nil)
         progressIndicator = nil
@@ -126,18 +146,33 @@ final class FloatingPanelController: NSObject {
         titleLabel.stringValue = title
 
         let bodyHeight: CGFloat
+        let canRecallHistory: Bool
         switch state {
         case let .loading(message):
             bodyHeight = renderLoading(message)
+            canRecallHistory = false
         case let .result(presentation):
             bodyHeight = renderResult(presentation)
+            canRecallHistory = true
         case let .error(message):
             bodyHeight = renderError(message)
+            canRecallHistory = true
         }
 
-        let height = min(max(Metrics.headerHeight + bodyHeight, 140), Metrics.maximumPanelHeight)
-        layoutPanel(height: height, bodyHeight: bodyHeight)
-        positionNearMouse(width: Metrics.panelWidth, height: height)
+        // Disable recall during loading so an in-flight result cannot overwrite a history selection.
+        historyView.update(entries: history.entries, selectedSourceText: selectedSourceText, isEnabled: canRecallHistory)
+        let historyHeight = history.entries.isEmpty ? 0 : TranslationHistoryView.preferredHeight
+        let height = min(max(Metrics.headerHeight + bodyHeight + historyHeight, 100), Metrics.maximumPanelHeight)
+        let previousFrame = panel.frame
+        layoutPanel(height: height, bodyHeight: bodyHeight, historyHeight: historyHeight)
+        if followsMouse {
+            positionNearMouse(width: Metrics.panelWidth, height: height)
+        } else {
+            // Keep history under the pointer when switching results, subject to the screen's top edge.
+            let screen = panel.screen ?? NSScreen.main
+            let maximumY = (screen?.visibleFrame.maxY ?? previousFrame.maxY) - height - 10
+            panel.setFrameOrigin(NSPoint(x: previousFrame.minX, y: min(previousFrame.minY, maximumY)))
+        }
         panel.orderFrontRegardless()
 
         if let seconds {
@@ -173,38 +208,48 @@ final class FloatingPanelController: NSObject {
         return 150
     }
 
-    /// Lays out primary text, pronunciation, and copyable candidates from the parsed backend response.
+    /// Lays out the complete primary copy action, pronunciation, and copyable candidates from the parsed response.
     private func renderResult(_ presentation: TranslationResultPresentation) -> CGFloat {
-        var y = Metrics.contentPadding
+        var y = Metrics.verticalPadding
 
         let sectionLabel = makeLabel(
             "主译",
             font: .systemFont(ofSize: 12, weight: .medium),
             color: .secondaryLabelColor
         )
-        sectionLabel.frame = NSRect(x: Metrics.contentPadding, y: y, width: Metrics.contentWidth, height: 15)
+        sectionLabel.frame = NSRect(x: Metrics.contentPadding, y: y, width: Metrics.contentWidth - 28, height: 15)
         bodyView.addSubview(sectionLabel)
-        y += 23
+        let copyPrimaryButton = PrimaryTranslationCopyButton(translation: presentation.primaryTranslation) { [weak self] in
+            self?.hidePanel()
+        }
+        copyPrimaryButton.frame = NSRect(
+            x: Metrics.contentPadding + Metrics.contentWidth - 24,
+            y: y - 6,
+            width: 24,
+            height: 24
+        )
+        bodyView.addSubview(copyPrimaryButton)
+        y += 18
 
         let primaryText = presentation.primaryTranslation.isEmpty ? "暂无翻译结果" : presentation.primaryTranslation
-        let primary = makeLabel(primaryText, font: .systemFont(ofSize: 22, weight: .medium))
+        let primary = makeLabel(primaryText, font: .systemFont(ofSize: 20, weight: .medium))
         let primaryHeight = measuredTextHeight(primary.attributedStringValue, width: Metrics.contentWidth)
         primary.frame = NSRect(
             x: Metrics.contentPadding,
             y: y,
             width: Metrics.contentWidth,
-            height: max(primaryHeight, 31)
+            height: max(primaryHeight, 25)
         )
         bodyView.addSubview(primary)
-        y += max(primaryHeight, 31)
+        y += max(primaryHeight, 25)
 
         if let pronunciation = presentation.pronunciation {
-            y += 12
+            y += 6
             let pronunciationBackground = PopupTintedBackgroundView()
             let pronunciationLabel = makePronunciationLabel(pronunciation)
             let pronunciationHeight = max(
-                measuredTextHeight(pronunciationLabel.attributedStringValue, width: Metrics.contentWidth - 24) + 18,
-                38
+                measuredTextHeight(pronunciationLabel.attributedStringValue, width: Metrics.contentWidth - 24) + 10,
+                28
             )
             pronunciationBackground.frame = NSRect(
                 x: Metrics.contentPadding,
@@ -214,9 +259,9 @@ final class FloatingPanelController: NSObject {
             )
             pronunciationLabel.frame = NSRect(
                 x: 12,
-                y: 9,
+                y: 5,
                 width: Metrics.contentWidth - 24,
-                height: pronunciationHeight - 18
+                height: pronunciationHeight - 10
             )
             pronunciationBackground.addSubview(pronunciationLabel)
             bodyView.addSubview(pronunciationBackground)
@@ -224,7 +269,7 @@ final class FloatingPanelController: NSObject {
         }
 
         if !presentation.candidates.isEmpty {
-            y += 18
+            y += 10
             let candidatesLabel = makeLabel(
                 "候选",
                 font: .systemFont(ofSize: 12, weight: .medium),
@@ -237,7 +282,7 @@ final class FloatingPanelController: NSObject {
                 height: 15
             )
             bodyView.addSubview(candidatesLabel)
-            y += 22
+            y += 18
 
             for candidate in presentation.candidates {
                 guard let linkURL = TranslationCandidateLink.url(for: candidate.term) else {
@@ -259,7 +304,7 @@ final class FloatingPanelController: NSObject {
             }
         }
 
-        return y + Metrics.contentPadding
+        return y + Metrics.verticalPadding
     }
 
     /// Builds the warning state with semantic system colors so it follows macOS appearance changes.
@@ -300,6 +345,17 @@ final class FloatingPanelController: NSObject {
     /// Hides the floating result panel when the user clicks the close control.
     @objc private func closePanel() {
         hidePanel()
+    }
+
+    /// Reuses the normal result renderer and copy actions while leaving translation recency unchanged.
+    private func showHistoryEntry(_ entry: TranslationHistory.Entry) {
+        selectedSourceText = entry.sourceText
+        show(
+            title: "翻译结果",
+            state: .result(TranslationResultPresentation(response: entry.translation)),
+            autoHideAfter: nil,
+            followsMouse: false
+        )
     }
 
     /// Creates a wrapping label with semantic defaults shared by all popup states.
@@ -352,19 +408,20 @@ final class FloatingPanelController: NSObject {
         return ceil(rect.height)
     }
 
-    /// Keeps the header fixed while the state body grows up to the approved 360-point limit.
-    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat) {
-        let bodyViewportHeight = height - Metrics.headerHeight
+    /// Keeps the compact header and history fixed while long results scroll within the 360-point limit.
+    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat, historyHeight: CGFloat) {
+        let bodyViewportHeight = height - Metrics.headerHeight - historyHeight
         let headerBottom = height - Metrics.headerHeight
         let documentHeight = max(bodyHeight, bodyViewportHeight)
 
         panel.setContentSize(NSSize(width: Metrics.panelWidth, height: height))
         containerView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: height)
-        headerIconView.frame = NSRect(x: 16, y: headerBottom + 16, width: 18, height: 18)
-        titleLabel.frame = NSRect(x: 43, y: headerBottom + 15, width: 325, height: 20)
-        closeButton.frame = NSRect(x: 378, y: headerBottom + 11, width: 28, height: 28)
+        headerIconView.frame = NSRect(x: 16, y: headerBottom + 10, width: 18, height: 18)
+        titleLabel.frame = NSRect(x: 43, y: headerBottom + 9, width: 325, height: 20)
+        closeButton.frame = NSRect(x: 378, y: headerBottom + 5, width: 28, height: 28)
         headerSeparator.frame = NSRect(x: 0, y: headerBottom, width: Metrics.panelWidth, height: 1)
-        scrollView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: bodyViewportHeight)
+        scrollView.frame = NSRect(x: 0, y: historyHeight, width: Metrics.panelWidth, height: bodyViewportHeight)
+        historyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: historyHeight)
         bodyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: documentHeight)
         scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -443,6 +500,50 @@ final class FloatingPanelController: NSObject {
     deinit {
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
+        }
+    }
+}
+
+/// Captures the full displayed result independently of text wrapping, scrolling, and later history selections.
+@MainActor
+final class PrimaryTranslationCopyButton: NSButton {
+    private let translation: String
+    private let pasteboard: NSPasteboard
+    private let onCopy: () -> Void
+
+    /// Uses the system clipboard in the app and permits an isolated clipboard for native action tests.
+    init(translation: String, pasteboard: NSPasteboard = .general, onCopy: @escaping () -> Void) {
+        self.translation = translation
+        self.pasteboard = pasteboard
+        self.onCopy = onCopy
+        super.init(frame: .zero)
+
+        image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: "复制主译")
+        symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        imagePosition = .imageOnly
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryChange)
+        contentTintColor = .secondaryLabelColor
+        toolTip = "复制完整主译"
+        setAccessibilityLabel("复制完整主译")
+        isEnabled = !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        target = self
+        action = #selector(copyTranslation)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    /// Dismisses through the supplied callback only after the entire primary text reaches the clipboard.
+    @objc private func copyTranslation() {
+        guard isEnabled else {
+            return
+        }
+        pasteboard.clearContents()
+        if pasteboard.setString(translation, forType: .string) {
+            onCopy()
         }
     }
 }

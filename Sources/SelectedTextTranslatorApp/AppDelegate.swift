@@ -254,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let selectedText = try await selectionReader.readSelectedText()
             floatingPanel.showLoading("正在翻译...")
             let translation = try await backendClient.translate(selectedText, targetLanguage: "auto")
-            floatingPanel.showResult(translation)
+            floatingPanel.showResult(translation, sourceText: selectedText)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             floatingPanel.showError(message)

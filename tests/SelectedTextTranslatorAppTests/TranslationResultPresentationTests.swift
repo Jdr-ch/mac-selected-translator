@@ -1,14 +1,45 @@
-import Foundation
+import AppKit
 import Testing
 @testable import SelectedTextTranslatorApp
 
 /// Locks the backend-text presentation contract without opening a real AppKit panel.
 struct TranslationResultPresentationTests {
+    /// Copies full paragraphs from both plain and structured results through the actual native button action.
+    @Test(arguments: [false, true])
+    @MainActor
+    func primaryCopyPreservesLongTextAndLineBreaks(hasStructuredSections: Bool) {
+        _ = NSApplication.shared
+        let paragraph = Array(repeating: "The complete translation remains available beyond the visible panel.", count: 20)
+            .joined(separator: " ") + "\n这一行也需要完整复制。"
+        let response = hasStructuredSections
+            ? "主译：\(paragraph)\n音标：translation /trænsˈleɪʃən/\n候选：\n- 翻译（名词）"
+            : paragraph
+        let presentation = TranslationResultPresentation(response: response)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        var didCopy = false
+        let button = PrimaryTranslationCopyButton(translation: presentation.primaryTranslation, pasteboard: pasteboard) {
+            didCopy = true
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 24, height: 24),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = button
+
+        button.performClick(nil)
+
+        #expect(pasteboard.string(forType: .string) == paragraph)
+        #expect(didCopy)
+    }
+
     /// Verifies one-line candidates use the compact row while wrapped context still receives padding.
     @Test
     func candidateRowsUseCompactHeight() {
-        #expect(CandidateRowLayout.preferredHeight(textHeight: 17) == 30)
-        #expect(CandidateRowLayout.preferredHeight(textHeight: 34) == 40)
+        #expect(CandidateRowLayout.preferredHeight(textHeight: 17) == 26)
+        #expect(CandidateRowLayout.preferredHeight(textHeight: 34) == 38)
     }
 
     /// Verifies the backend's standard response is split into the three approved visual sections.
