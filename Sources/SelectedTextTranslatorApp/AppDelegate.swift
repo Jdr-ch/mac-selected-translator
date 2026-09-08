@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let backendClient: BackendClient
     private let backendSupervisor: BackendSupervisor
     private let selectionReader = AccessibilitySelectionReader()
@@ -10,6 +10,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowLayoutController = WindowLayoutController()
     private let sleepPreventionController = SleepPreventionController()
     private let iphoneLocationWindowController: IPhoneLocationWindowController
+    private let polishWindowController: ContentPolishWindowController
+    /// Captured before native menu tracking changes focus; never infer the source from the new panel.
+    private var menuSourceApplication: NSRunningApplication?
+    private var polishSelectionTask: Task<Void, Never>?
     private var hotkeyMonitor: HotkeyMonitor?
     private var statusItem: NSStatusItem?
     /// Updates the standard status-button image so AppKit can reuse it on every display's menu bar.
@@ -32,6 +36,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.iphoneLocationWindowController = IPhoneLocationWindowController(
             projectRoot: configuration.projectRoot
         )
+        let client = self.backendClient
+        let supervisor = self.backendSupervisor
+        self.polishWindowController = ContentPolishWindowController(session: ContentPolishSession { request in
+            try await supervisor.ensureBackendRunning()
+            try Task.checkCancellation()
+            return try await client.polish(request)
+        })
         super.init()
     }
 
@@ -54,6 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(statusItemMouseMonitor)
         }
         iphoneLocationWindowController.shutdown()
+        polishSelectionTask?.cancel()
+        polishWindowController.session.cancel()
         sleepPreventionController.restoreSystemSleep()
         backendSupervisor.terminateOwnedBackend()
     }
@@ -73,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(makeMenuItem(title: "翻译当前选中文字", action: #selector(translateFromMenu)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "整理", action: #selector(organizeWindows)))
@@ -91,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "iPhone 定位", action: #selector(showIPhoneLocation)))
+        menu.addItem(makeMenuItem(title: "内容润色", action: #selector(showContentPolish)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
         menu.addItem(makeMenuItem(title: "查看快捷键状态", action: #selector(showHotkeyStatus)))
@@ -301,6 +316,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Opens the retained location panel so its device and simulation state survives menu dismissal.
     @objc private func showIPhoneLocation() {
         iphoneLocationWindowController.showWindow()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuSourceApplication = NSWorkspace.shared.frontmostApplication
+    }
+
+    /// Reads the source before opening the centered window, then automatically submits that selection.
+    @objc private func showContentPolish() {
+        guard polishSelectionTask == nil else { return }
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        let sourceApplication = menuSourceApplication
+        if sourceApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            polishWindowController.reveal(on: screen)
+            return
+        }
+        polishSelectionTask = Task { @MainActor in
+            defer { polishSelectionTask = nil }
+            do {
+                let text = try await selectionReader.readSelectedText(from: sourceApplication)
+                guard !Task.isCancelled else { return }
+                polishWindowController.show(sourceText: text, on: screen)
+            } catch {
+                guard !Task.isCancelled else { return }
+                let message: String
+                if case TranslatorAppError.noSelectedText = error {
+                    message = "未读取到选中文字，可在原文区域粘贴内容。"
+                } else {
+                    message = error.localizedDescription
+                }
+                polishWindowController.show(sourceText: "", on: screen, captureError: message)
+            }
+        }
     }
 
     /// Shows the floating panel without reading selection or calling the model.

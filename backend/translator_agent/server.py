@@ -32,25 +32,33 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        """Translate text submitted by the local desktop client."""
+        """Route translation and same-language polishing through separate model policies."""
 
-        if self.path != "/translate":
+        if self.path not in ("/translate", "/polish"):
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
 
         try:
             payload = self._read_json_body()
             text = self._read_text(payload)
-            target_language = payload.get("target_language")
-            translation = self.agent.translate(text, target_language)
+            if self.path == "/polish":
+                result = {
+                    "polished_text": self.agent.polish(
+                        text, payload.get("role"), payload.get("scenario"), payload.get("tone")
+                    )
+                }
+            else:
+                target_language = payload.get("target_language")
+                result = {"translation": self.agent.translate(text, target_language)}
         except (ValueError, TranslationError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         except Exception as exc:  # noqa: BLE001 - the UI needs a readable error payload.
-            self._send_json({"error": f"翻译请求失败：{exc}"}, HTTPStatus.BAD_GATEWAY)
+            operation = "润色" if self.path == "/polish" else "翻译"
+            self._send_json({"error": f"{operation}请求失败：{exc}"}, HTTPStatus.BAD_GATEWAY)
             return
 
-        self._send_json({"translation": translation})
+        self._send_json(result)
 
     def log_message(self, format: str, *args: Any) -> None:
         """Keep the backend log concise while preserving useful request lines."""
@@ -82,7 +90,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("字段 text 必须是字符串。")
         if len(text) > self.settings.max_input_chars:
             raise ValueError(
-                f"选中文字超过 {self.settings.max_input_chars} 字符，请缩短后再翻译。"
+                f"选中文字超过 {self.settings.max_input_chars} 字符，请缩短后重试。"
             )
         return text
 

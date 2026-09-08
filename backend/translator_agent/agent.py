@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_openai import ChatOpenAI
 
 from .config import Settings
+from .polishing import polish_messages
 
 
 
@@ -99,6 +100,16 @@ class TranslatorAgent:
         elif not requires_phonetics:
             content = self._removing_phonetics_line(content)
 
+        return content
+
+    def polish(self, text: str, role: object, scenario: object, tone: object) -> str:
+        """Rewrite original text using the existing configured model and a separate prompt policy."""
+
+        messages = polish_messages(text, role, scenario, tone)
+        response = self._llm.invoke(messages)
+        content = self._coerce_content(response.content).strip()
+        if not content:
+            raise TranslationError("模型返回了空润色结果，请重试。")
         return content
 
     @classmethod

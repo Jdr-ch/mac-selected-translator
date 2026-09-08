@@ -16,13 +16,25 @@ final class AccessibilitySelectionReader {
     /// attribute. Some apps do not expose that attribute consistently, so the
     /// fallback performs a temporary Command+C and restores the previous
     /// pasteboard snapshot after reading the copied string.
-    func readSelectedText() async throws -> String {
+    func readSelectedText(from application: NSRunningApplication? = nil) async throws -> String {
         if !Self.isAccessibilityTrusted(prompt: false) {
             throw TranslatorAppError.accessibilityPermissionMissing
         }
 
-        let selectedText = await Task.detached(priority: .userInitiated) {
-            Self.readViaAccessibility() ?? Self.readViaCopyShortcut()
+        guard let application = application ?? NSWorkspace.shared.frontmostApplication else {
+            throw TranslatorAppError.noSelectedText
+        }
+        let processIdentifier = application.processIdentifier
+        let selectedText = await Task.detached(priority: .userInitiated) { () -> String? in
+            if let text = Self.readViaAccessibility(processIdentifier: processIdentifier),
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
+            }
+            // Never send Command+C to a different app after the source lost focus.
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else {
+                return nil
+            }
+            return Self.readViaCopyShortcut()
         }.value
 
         guard let text = selectedText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
@@ -31,12 +43,8 @@ final class AccessibilitySelectionReader {
         return text
     }
 
-    private static func readViaAccessibility() -> String? {
-        guard let foregroundApp = NSWorkspace.shared.frontmostApplication else {
-            return nil
-        }
-
-        let appElement = AXUIElementCreateApplication(foregroundApp.processIdentifier)
+    private static func readViaAccessibility(processIdentifier: pid_t) -> String? {
+        let appElement = AXUIElementCreateApplication(processIdentifier)
         var focusedValue: CFTypeRef?
         let focusResult = AXUIElementCopyAttributeValue(
             appElement,
@@ -75,11 +83,20 @@ final class AccessibilitySelectionReader {
         postCommandC()
         Thread.sleep(forTimeInterval: 0.18)
 
-        let copiedText = pasteboard.string(forType: .string)
+        let copiedText = copiedSelection(
+            pasteboard.string(forType: .string),
+            before: initialChangeCount,
+            after: pasteboard.changeCount
+        )
         if pasteboard.changeCount != initialChangeCount {
             restorePasteboardItems(snapshot, to: pasteboard)
         }
         return copiedText
+    }
+
+    /// No clipboard mutation means copy failed; returning the old clipboard would polish unrelated text.
+    static func copiedSelection(_ text: String?, before: Int, after: Int) -> String? {
+        before == after ? nil : text
     }
 
     private static func postCommandC() {
