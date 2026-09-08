@@ -292,8 +292,8 @@ struct FlowchartTests {
         controller.shutdown()
     }
 
-    @Test @MainActor
-    func visibleExportShowsConfirmationAndRevealsTheSavedFile() async throws {
+    @Test(arguments: [true, false]) @MainActor
+    func exportConfirmationClosesPanelOnlyWhenRevealingFile(showInFinder: Bool) async throws {
         _ = NSApplication.shared
         let name = "FlowchartTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
@@ -308,7 +308,8 @@ struct FlowchartTests {
             window.close()
             controller.shutdown()
         }
-        controller.session.edit { $0.document = .example }
+        let document = FlowchartDocument.example
+        controller.session.edit { $0.document = document }
         controller.showWindow()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("flowchart-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -338,13 +339,26 @@ struct FlowchartTests {
             capture.waitUntilExit()
             #expect(capture.terminationStatus == 0)
         }
-        let reveal = try #require(controls.compactMap { $0 as? NSButton }.first { $0.title == "在 Finder 中显示" })
-        reveal.performClick(nil)
+        let actionTitle = showInFinder ? "在 Finder 中显示" : "完成"
+        let action = try #require(controls.compactMap { $0 as? NSButton }.first { $0.title == actionTitle })
+        action.performClick(nil)
         for _ in 0..<100 {
-            if revealedURL != nil { break }
+            if window.attachedSheet == nil && window.isVisible == !showInFinder { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
+        #expect(window.attachedSheet == nil)
+        #expect(window.isVisible == !showInFinder)
+        #expect(revealedURL == (showInFinder ? saved : nil))
+        // The retained editor must reopen intact; its footer uses the same Finder handoff behavior.
+        controller.showWindow()
+        #expect(controller.window === window)
+        #expect(window.isVisible)
+        #expect(controller.session.state.document == document)
+        let content = try #require(window.contentView)
+        let reveal = try #require(Self.controls(in: content).compactMap { $0 as? NSButton }.first { $0.title == "在 Finder 中显示" })
+        reveal.performClick(nil)
         #expect(revealedURL == saved)
+        #expect(!window.isVisible)
     }
 
     @Test @MainActor

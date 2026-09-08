@@ -419,10 +419,11 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
         Task { [weak self] in await self?.performExport(isPNG: true, destination: nil) }
     }
 
-    /// Select the successfully exported file in its actual directory, including custom save locations.
+    /// Hand off to Finder and close the panel while retaining the document for reopening.
     @objc private func showExportInFinder() {
         guard let lastExportURL else { return }
         revealExport(lastExportURL)
+        close()
     }
 
     /// A completed save needs visible feedback above the canvas, with a direct action for that exact file.
@@ -435,8 +436,10 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
         alert.addButton(withTitle: "在 Finder 中显示")
         alert.addButton(withTitle: "完成")
         alert.beginSheetModal(for: window) { [weak self] response in
+            // Done dismisses only the confirmation; revealing the file also closes the editor.
             guard response == .alertFirstButtonReturn else { return }
             self?.revealExport(url)
+            self?.close()
         }
     }
 
