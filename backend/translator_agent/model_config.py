@@ -15,6 +15,7 @@ except ModuleNotFoundError:  # Python 3.10 uses the same TOML parser through its
     import tomli as tomllib
 
 from langchain_openai import ChatOpenAI
+import httpx
 
 
 class ModelConfigurationError(ValueError):
@@ -38,9 +39,23 @@ class ModelConfiguration:
 class ModelConfigurationReader:
     """Reread the selected CLI's files for every panel refresh and model request."""
 
-    def __init__(self, home: Path | None = None, environment: Mapping[str, str] | None = None) -> None:
+    def __init__(self, home: Path | None = None, environment: Mapping[str, str] | None = None,
+                 http_client: httpx.Client | None = None) -> None:
         self.home = Path.home() if home is None else home
         self.environment = os.environ if environment is None else environment
+        # Reuse TCP/TLS pools only; model settings and authentication remain per-request snapshots.
+        self._owns_http_client = http_client is None
+        self._http_client = http_client if http_client is not None else httpx.Client(
+            # HTTP/2 keeps the connection reusable even when the SDK closes at the SSE end marker.
+            http2=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=300),
+            follow_redirects=True,
+        )
+
+    def close(self) -> None:
+        """Release the service-owned connection pool during backend shutdown."""
+        if self._owns_http_client:
+            self._http_client.close()
 
     def read(self, provider: object, *, include_credentials: bool = False) -> ModelConfiguration:
         """Resolve only the two approved providers and redact parser/authentication failures."""
@@ -73,7 +88,7 @@ class ModelConfigurationReader:
             options["extra_body"]["enable_thinking"] = reasoning == "thinking"
         try:
             return ChatOpenAI(model=configuration.model, timeout=timeout, max_retries=0,
-                              **options)
+                              http_client=self._http_client, **options)
         except Exception:
             # SDK validation errors can print the rejected configuration, including credentials.
             raise ModelConfigurationError(f"模型配置不可用，请检查 {configuration.source}。") from None

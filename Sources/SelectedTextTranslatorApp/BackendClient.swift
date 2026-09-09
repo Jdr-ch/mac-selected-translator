@@ -20,33 +20,68 @@ struct BackendClient {
     /// The Python service resolves the chosen CLI configuration for each request;
     /// model credentials never enter the native UI or the local request body.
     func translate(_ text: String, targetLanguage: String, provider: ModelProvider,
-                   reasoning: ModelReasoning) async throws -> ModelTextResult {
+                   reasoning: ModelReasoning,
+                   onProgress: @escaping @MainActor (TranslationStreamPreview) -> Void = { _ in }) async throws -> ModelTextResult {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         // Short translations may make a second model call to complete IPA.
         request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 2, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/x-ndjson", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder().encode(
-            TranslateRequest(text: text, targetLanguage: targetLanguage, provider: provider, reasoning: reasoning)
+            TranslateRequest(text: text, targetLanguage: targetLanguage, provider: provider, reasoning: reasoning, stream: true)
         )
 
         do {
-            let (data, response) = try await urlSession.data(for: request)
+            let (bytes, response) = try await urlSession.bytes(for: request)
+            defer { bytes.task.cancel() }
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw TranslatorAppError.invalidBackendResponse
             }
 
             guard (200..<300).contains(httpResponse.statusCode) else {
+                var data = Data()
+                for try await byte in bytes { data.append(byte) }
                 let message = try? JSONDecoder().decode(ErrorResponse.self, from: data).error
                 throw TranslatorAppError.backendError(message ?? "翻译服务返回 HTTP \(httpResponse.statusCode)。")
             }
 
-            let payload = try JSONDecoder().decode(TranslateResponse.self, from: data)
-            return ModelTextResult(text: payload.translation,
-                                   completion: ModelCompletion(provider: provider, reasoning: reasoning, aiMS: payload.aiMS))
+            guard httpResponse.mimeType == "application/x-ndjson" else {
+                throw TranslatorAppError.backendError("当前本地服务不支持流式翻译，请退出 App 后重新启动。")
+            }
+            var accumulated = ""
+            var lastPreview: TranslationStreamPreview?
+            var lastUpdate = ContinuousClock.now
+            for try await line in bytes.lines where !line.isEmpty {
+                try Task.checkCancellation()
+                let event = try JSONDecoder().decode(TranslationStreamEvent.self, from: Data(line.utf8))
+                switch event.type {
+                case .delta:
+                    guard let text = event.text else { throw TranslatorAppError.invalidBackendResponse }
+                    accumulated += text
+                    // Flush completed lines immediately; cap intermediate token layout work at 25 FPS.
+                    if lastPreview == nil || text.contains("\n") || lastUpdate.duration(to: .now) >= .milliseconds(40),
+                       let preview = TranslationStreamPreview(response: accumulated), preview != lastPreview {
+                        await onProgress(preview)
+                        lastPreview = preview
+                        lastUpdate = .now
+                    }
+                case .complete:
+                    guard let text = event.translation, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          let aiMS = event.aiMS, aiMS.isFinite, aiMS >= 0 else {
+                        throw TranslatorAppError.invalidBackendResponse
+                    }
+                    return ModelTextResult(text: text,
+                                           completion: ModelCompletion(provider: provider, reasoning: reasoning, aiMS: aiMS))
+                case .error:
+                    throw TranslatorAppError.backendError(event.error ?? "翻译请求中断，请重试。")
+                }
+            }
+            throw TranslatorAppError.backendError("翻译连接已中断，请重试。")
         } catch let error as TranslatorAppError {
             throw error
         } catch {
+            if Task.isCancelled { throw CancellationError() }
             throw TranslatorAppError.backendNotReachable(error.localizedDescription)
         }
     }

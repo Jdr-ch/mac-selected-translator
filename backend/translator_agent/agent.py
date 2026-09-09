@@ -9,6 +9,8 @@ lookup, rewrite modes, and history tools.
 from __future__ import annotations
 
 import re
+from contextlib import closing
+from typing import Callable
 
 import jieba
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -50,13 +52,15 @@ class TranslatorAgent:
     def __init__(self, client: ChatOpenAI) -> None:
         self._llm = client
 
-    def translate(self, text: str, target_language: str | None = None) -> str:
+    def translate(self, text: str, target_language: str | None = None,
+                  on_delta: Callable[[str], None] | None = None) -> str:
         """Translate selected text and return the model's final content.
 
         Args:
             text: Raw text captured from the foreground macOS application.
             target_language: Kept for API compatibility; the current prompt
                 auto-detects Chinese vs English instead of trusting the client.
+            on_delta: Receives draft answer chunks before final IPA validation.
 
         Raises:
             TranslationError: When the selected text is empty or the model does
@@ -76,7 +80,7 @@ class TranslatorAgent:
             HumanMessage(content=f"原文：\n{clean_text}"),
         ]
 
-        content = self._invoke(messages)
+        content = self._stream_invoke(messages, on_delta) if on_delta is not None else self._invoke(messages)
         if requires_phonetics and not self._has_valid_phonetics(content, clean_text):
             content = self._retry_with_phonetics(messages, content)
             if not self._has_valid_phonetics(content, clean_text):
@@ -179,6 +183,25 @@ class TranslatorAgent:
         except Exception:
             raise RuntimeError("Model request failed") from None
 
+    def _stream_invoke(self, messages: list[BaseMessage], on_delta: Callable[[str], None]) -> str:
+        """Forward answer text immediately; close upstream when the local consumer disconnects."""
+        parts: list[str] = []
+        try:
+            with closing(self._llm.stream(messages)) as chunks:
+                for chunk in chunks:
+                    text = self._coerce_content(chunk.content)
+                    if text:
+                        parts.append(text)
+                        on_delta(text)
+        except (APITimeoutError, BrokenPipeError, ConnectionResetError):
+            raise
+        except Exception:
+            raise RuntimeError("Model request failed") from None
+        content = "".join(parts).strip()
+        if not content:
+            raise TranslationError("模型返回了空译文。")
+        return content
+
     def _retry_with_phonetics(self, messages: list[BaseMessage], content: str) -> str:
         """Retry once when a short selection omits or misplaces the IPA line."""
 
@@ -276,8 +299,9 @@ class TranslatorAgent:
             for item in content:
                 if isinstance(item, str):
                     parts.append(item)
-                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                elif (isinstance(item, dict) and item.get("type") in (None, "text", "output_text")
+                      and isinstance(item.get("text"), str)):
                     parts.append(item["text"])
             return "\n".join(parts)
 
-        return str(content)
+        return "" if content is None else str(content)

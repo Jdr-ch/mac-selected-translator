@@ -91,9 +91,9 @@ struct ModelSelectionTests {
             requests.append(request)
             switch request.url!.path {
             case "/health":
-                return Data("{\"capabilities\":[\"model-switching\",\"reasoning-selection\",\"generation-metrics\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
+                return Data("{\"capabilities\":[\"model-switching\",\"reasoning-selection\",\"generation-metrics\",\"translation-streaming\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
             case "/models/codex": return Data(#"{"provider":"codex","model":"configured-model","source":"~/.codex/config.toml"}"#.utf8)
-            case "/translate": return Data(#"{"translation":"译文","ai_ms":10500}"#.utf8)
+            case "/translate": return Data((#"{"type":"complete","translation":"译文","ai_ms":10500}"# + "\n").utf8)
             case "/flowchart":
                 var response: [String: Any] = ["model": "configured-model", "ai_ms": 10]
                 response["diagram"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FlowchartDocument.example))
@@ -123,14 +123,18 @@ struct ModelSelectionTests {
         let polishRequest = try #require(requests.first { $0.url?.path == "/polish" })
         #expect(translationRequest.timeoutInterval == 245)
         #expect(polishRequest.timeoutInterval == 185)
-        let translation = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: translationRequest)) as? [String: String])
+        let translation = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: translationRequest)) as? [String: Any])
         let polish = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: polishRequest)) as? [String: String])
-        #expect(translation["provider"] == "codex")
+        #expect(translation["provider"] as? String == "codex")
         #expect(polish["provider"] == "qwen")
-        #expect(translation["reasoning"] == "high")
+        #expect(translation["reasoning"] as? String == "high")
+        #expect(translation["stream"] as? Bool == true)
         #expect(polish["reasoning"] == "thinking")
         #expect(translation["api_key"] == nil && polish["api_key"] == nil)
-        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection","generation-metrics"],"request_timeout_seconds":120}"#.utf8))
+        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection","generation-metrics","translation-streaming"],"request_timeout_seconds":120}"#.utf8))
+        #expect(throws: TranslatorAppError.self) {
+            try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection","generation-metrics"],"request_timeout_seconds":120}"#.utf8))
+        }
         #expect(throws: TranslatorAppError.self) {
             try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection"],"request_timeout_seconds":120}"#.utf8))
         }
@@ -221,7 +225,8 @@ private final class ModelTestURLProtocol: URLProtocol {
             request.httpBody = Self.body(of: request)
             let data = try Self.respond!(request)
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
-                                           headerFields: ["Content-Type": "application/json"])!
+                                           headerFields: ["Content-Type": request.url?.path == "/translate"
+                                               ? "application/x-ndjson" : "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)

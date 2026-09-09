@@ -18,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Captured before native menu tracking changes focus; never infer the source from the new panel.
     private var menuSourceApplication: NSRunningApplication?
     private var polishSelectionTask: Task<Void, Never>?
+    /// Retained through selection and streaming so dismissal cancels every late UI update.
+    private var translationTask: Task<Void, Never>?
     private var hotkeyMonitor: HotkeyMonitor?
     private var statusItem: NSStatusItem?
     /// Updates the standard status-button image so AppKit can reuse it on every display's menu bar.
@@ -60,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return try await client.polish(request, provider: provider, reasoning: reasoning)
         })
         super.init()
+        floatingPanel.onDismiss = { [weak self] in self?.translationTask?.cancel() }
         selection.onChange = { [weak self] in self?.updateModelMenu() }
     }
 
@@ -84,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         iphoneLocationWindowController.shutdown()
         flowchartWindowController?.shutdown()
         polishSelectionTask?.cancel()
+        translationTask?.cancel()
         polishWindowController.session.cancel()
         modelWindowController.session.cancel()
         sleepPreventionController.restoreSystemSleep()
@@ -261,13 +265,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The method serializes translation requests so repeated hotkey presses do
     /// not create overlapping model calls or race the floating panel state.
     private func handleTranslateShortcut() {
-        guard !isTranslating else {
-            floatingPanel.showError("上一次翻译仍在进行，请稍等。")
-            return
-        }
+        guard translationTask == nil else { return }
 
-        Task { @MainActor in
+        translationTask = Task { @MainActor in
             await translateCurrentSelection()
+            translationTask = nil
         }
     }
 
@@ -288,12 +290,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             floatingPanel.showLoading("正在检查本地翻译服务...")
             try await backendSupervisor.ensureBackendRunning()
+            try Task.checkCancellation()
             let selectedText = try await selectionReader.readSelectedText()
+            try Task.checkCancellation()
             floatingPanel.showLoading("正在翻译...")
             let result = try await backendClient.translate(selectedText, targetLanguage: "auto",
-                                                           provider: provider, reasoning: reasoning)
-            floatingPanel.showResult(result.text, sourceText: selectedText, completion: result.completion)
+                                                           provider: provider, reasoning: reasoning) { [weak self] preview in
+                guard !Task.isCancelled else { return }
+                self?.floatingPanel.showStreamingResult(preview)
+            }
+            try Task.checkCancellation()
+            floatingPanel.showResult(result.text, sourceText: selectedText, completion: result.completion, followsMouse: false)
         } catch {
+            if Task.isCancelled { return }
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             floatingPanel.showError(message)
         }

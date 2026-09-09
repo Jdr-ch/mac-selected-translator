@@ -22,6 +22,68 @@ class StubLLM:
         return SimpleNamespace(content=next(self._responses))
 
 
+class StreamingLLM(StubLLM):
+    """Expose each draft chunk before completing, with observable generator cleanup."""
+
+    def __init__(self, chunks, responses=()) -> None:
+        super().__init__(responses)
+        self.chunks = chunks
+        self.closed = False
+        self.stream_calls = 0
+
+    def stream(self, messages):
+        self.stream_calls += 1
+        try:
+            for content in self.chunks:
+                yield SimpleNamespace(content=content)
+        finally:
+            self.closed = True
+
+
+class TranslatorAgentStreamingTests(unittest.TestCase):
+    """Streaming changes delivery only, retaining the existing correction-call budget."""
+
+    def test_primary_arrives_before_completion_and_reasoning_is_not_forwarded(self) -> None:
+        llm = StreamingLLM([
+            [{"type": "reasoning", "text": "private reasoning"}],
+            [{"type": "text", "text": "主译：你"}],
+            "好\n音标：hello /həˈloʊ/\n候选：\n- 你好（日常问候）", None,
+        ])
+        seen = []
+
+        def receive(text):
+            self.assertFalse(llm.closed)
+            seen.append(text)
+
+        result = TranslatorAgent(llm).translate("hello", on_delta=receive)
+        self.assertEqual(seen[0], "主译：你")
+        self.assertEqual(result, "".join(seen))
+        self.assertNotIn("private", result)
+        self.assertTrue(llm.closed)
+        self.assertEqual(llm.stream_calls, 1)
+        self.assertEqual(llm.calls, [])
+
+    def test_optional_ipa_retry_replaces_draft_only_at_completion(self) -> None:
+        fixed = "主译：你好\n音标：hello /həˈloʊ/\n候选：\n- 你好（日常问候）"
+        llm = StreamingLLM(["主译：你好\n候选：\n- 你好"], [fixed])
+        seen = []
+        self.assertEqual(TranslatorAgent(llm).translate("hello", on_delta=seen.append), fixed)
+        self.assertEqual(seen, ["主译：你好\n候选：\n- 你好"])
+        self.assertEqual(len(llm.calls), 1)
+        self.assertEqual(llm.stream_calls, 1)
+
+    def test_disconnected_consumer_closes_upstream_without_ipa_retry(self) -> None:
+        llm = StreamingLLM(["主译：你", "好"])
+
+        def disconnected(_):
+            raise BrokenPipeError()
+
+        with self.assertRaises(BrokenPipeError):
+            TranslatorAgent(llm).translate("hello", on_delta=disconnected)
+        self.assertTrue(llm.closed)
+        self.assertEqual(llm.calls, [])
+
+
 class TranslatorAgentPhoneticsTests(unittest.TestCase):
     """Protect the five-word boundary and the plain-text response layout."""
 

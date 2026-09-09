@@ -83,6 +83,9 @@ final class BackendSupervisor {
         guard health?.capabilities?.contains("generation-metrics") == true else {
             throw TranslatorAppError.backendError("当前本地服务不支持生成耗时，请退出 App 后重新启动。")
         }
+        guard health?.capabilities?.contains("translation-streaming") == true else {
+            throw TranslatorAppError.backendError("当前本地服务不支持流式翻译，请退出 App 后重新启动。")
+        }
         _ = try health?.requestTimeout(modelCalls: 1)
     }
 

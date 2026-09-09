@@ -24,6 +24,7 @@ final class FloatingPanelController: NSObject {
 
     private enum PopupState {
         case loading(message: String)
+        case streaming(TranslationStreamPreview)
         case result(TranslationResultPresentation, ModelCompletion?)
         case error(message: String)
     }
@@ -40,6 +41,8 @@ final class FloatingPanelController: NSObject {
     private let historyView = TranslationHistoryView(frame: .zero)
     /// Fixed above history so generation metadata remains visible when long translations scroll.
     let completionLabel = NSTextField(labelWithString: "")
+    /// Copy, close and outside clicks stop the active stream before another update can reveal it.
+    var onDismiss: (() -> Void)?
     /// Identifies the displayed successful selection; loading and diagnostic messages have no selected entry.
     private var selectedSourceText: String?
     private var progressIndicator: NSProgressIndicator?
@@ -122,7 +125,8 @@ final class FloatingPanelController: NSObject {
     }
 
     /// Records successful selections only; diagnostic callers omit sourceText and never enter history.
-    func showResult(_ translation: String, sourceText: String? = nil, completion: ModelCompletion? = nil) {
+    func showResult(_ translation: String, sourceText: String? = nil, completion: ModelCompletion? = nil,
+                    followsMouse: Bool = true) {
         selectedSourceText = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let sourceText {
             history.record(sourceText: sourceText, translation: translation, completion: completion)
@@ -130,8 +134,17 @@ final class FloatingPanelController: NSObject {
         show(
             title: "翻译结果",
             state: .result(TranslationResultPresentation(response: translation), completion),
-            autoHideAfter: nil
+            autoHideAfter: nil,
+            followsMouse: followsMouse,
+            preservesTopEdge: !followsMouse
         )
+    }
+
+    /// Partial text is not history; completed lines remain copyable while the remaining answer arrives.
+    func showStreamingResult(_ preview: TranslationStreamPreview) {
+        selectedSourceText = nil
+        show(title: "翻译结果", state: .streaming(preview), autoHideAfter: nil,
+             followsMouse: false, preservesTopEdge: true)
     }
 
     /// Shows the actionable failure reason briefly before dismissing the transient panel.
@@ -145,7 +158,8 @@ final class FloatingPanelController: NSObject {
         title: String,
         state: PopupState,
         autoHideAfter seconds: TimeInterval?,
-        followsMouse: Bool = true
+        followsMouse: Bool = true,
+        preservesTopEdge: Bool = false
     ) {
         autoHideTimer?.invalidate()
         progressIndicator?.stopAnimation(nil)
@@ -156,11 +170,17 @@ final class FloatingPanelController: NSObject {
         let bodyHeight: CGFloat
         let canRecallHistory: Bool
         let completion: ModelCompletion?
+        var streamingStatus: String?
         switch state {
         case let .loading(message):
             bodyHeight = renderLoading(message)
             canRecallHistory = false
             completion = nil
+        case let .streaming(preview):
+            bodyHeight = renderResult(preview.presentation, canCopyPrimary: preview.canCopyPrimary)
+            canRecallHistory = false
+            completion = nil
+            streamingStatus = preview.canCopyPrimary ? "正在补全..." : "正在翻译..."
         case let .result(presentation, metadata):
             bodyHeight = renderResult(presentation)
             canRecallHistory = true
@@ -171,19 +191,25 @@ final class FloatingPanelController: NSObject {
             completion = nil
         }
 
-        completionLabel.stringValue = completion?.status("已翻译") ?? ""
+        completionLabel.stringValue = streamingStatus ?? completion?.status("已翻译") ?? ""
         completionLabel.toolTip = completionLabel.stringValue
-        completionLabel.isHidden = completion == nil
-        let completionHeight: CGFloat = completion == nil ? 0 : 28
+        completionLabel.isHidden = completionLabel.stringValue.isEmpty
+        let completionHeight: CGFloat = completionLabel.isHidden ? 0 : 28
 
         // Disable recall during loading so an in-flight result cannot overwrite a history selection.
         historyView.update(entries: history.entries, selectedSourceText: selectedSourceText, isEnabled: canRecallHistory)
         let historyHeight = history.entries.isEmpty ? 0 : TranslationHistoryView.preferredHeight
         let height = min(max(Metrics.headerHeight + bodyHeight + historyHeight + completionHeight, 100), Metrics.maximumPanelHeight)
         let previousFrame = panel.frame
-        layoutPanel(height: height, bodyHeight: bodyHeight, historyHeight: historyHeight, completionHeight: completionHeight)
+        layoutPanel(height: height, bodyHeight: bodyHeight, historyHeight: historyHeight,
+                    completionHeight: completionHeight, preservesScroll: preservesTopEdge)
         if followsMouse {
             positionNearMouse(width: Metrics.panelWidth, height: height)
+        } else if preservesTopEdge {
+            // Growing candidate rows must not move the primary text or follow a moving pointer.
+            let visible = (panel.screen ?? NSScreen.main)?.visibleFrame ?? previousFrame
+            let y = min(max(previousFrame.maxY - height, visible.minY + 10), visible.maxY - height - 10)
+            panel.setFrameOrigin(NSPoint(x: previousFrame.minX, y: y))
         } else {
             // Keep history under the pointer when switching results, subject to the screen's top edge.
             let screen = panel.screen ?? NSScreen.main
@@ -226,7 +252,7 @@ final class FloatingPanelController: NSObject {
     }
 
     /// Lays out the complete primary copy action, pronunciation, and copyable candidates from the parsed response.
-    private func renderResult(_ presentation: TranslationResultPresentation) -> CGFloat {
+    private func renderResult(_ presentation: TranslationResultPresentation, canCopyPrimary: Bool = true) -> CGFloat {
         var y = Metrics.verticalPadding
 
         let sectionLabel = makeLabel(
@@ -239,6 +265,7 @@ final class FloatingPanelController: NSObject {
         let copyPrimaryButton = PrimaryTranslationCopyButton(translation: presentation.primaryTranslation) { [weak self] in
             self?.hidePanel()
         }
+        copyPrimaryButton.isEnabled = canCopyPrimary
         copyPrimaryButton.frame = NSRect(
             x: Metrics.contentPadding + Metrics.contentWidth - 24,
             y: y - 6,
@@ -426,7 +453,9 @@ final class FloatingPanelController: NSObject {
     }
 
     /// Keeps the compact header and history fixed while long results scroll within the 360-point limit.
-    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat, historyHeight: CGFloat, completionHeight: CGFloat) {
+    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat, historyHeight: CGFloat,
+                             completionHeight: CGFloat, preservesScroll: Bool = false) {
+        let scrollOrigin = scrollView.contentView.bounds.origin
         let bodyViewportHeight = height - Metrics.headerHeight - historyHeight - completionHeight
         let headerBottom = height - Metrics.headerHeight
         let documentHeight = max(bodyHeight, bodyViewportHeight)
@@ -441,7 +470,8 @@ final class FloatingPanelController: NSObject {
         completionLabel.frame = NSRect(x: Metrics.contentPadding, y: historyHeight + 6, width: Metrics.contentWidth, height: 18)
         historyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: historyHeight)
         bodyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: documentHeight)
-        scrollView.contentView.scroll(to: .zero)
+        let offset = preservesScroll ? min(scrollOrigin.y, max(0, documentHeight - bodyViewportHeight)) : 0
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: offset))
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
@@ -470,6 +500,7 @@ final class FloatingPanelController: NSObject {
 
     /// Centralizes dismissal so timers, buttons, and outside clicks clear the same transient state.
     private func hidePanel() {
+        onDismiss?()
         autoHideTimer?.invalidate()
         progressIndicator?.stopAnimation(nil)
         panel.orderOut(nil)

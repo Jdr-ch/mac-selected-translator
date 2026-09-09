@@ -4,6 +4,7 @@ from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
+from socketserver import BaseRequestHandler, ThreadingTCPServer
 from tempfile import TemporaryDirectory
 from threading import Thread
 from types import SimpleNamespace
@@ -11,7 +12,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 import httpx
-from langchain_openai import ChatOpenAI
+from h2.config import H2Configuration
+from h2.connection import H2Connection
+from h2.events import DataReceived, RequestReceived, StreamEnded
 
 from backend.translator_agent.agent import TranslatorAgent
 from backend.translator_agent.config import ConfigError, Settings
@@ -59,6 +62,7 @@ class ModelConfigurationTests(unittest.TestCase):
         }
         self.qwen_path.write_text(json.dumps(self.qwen))
         self.reader = ModelConfigurationReader(self.home, {"DASHSCOPE_API_KEY": "stale-translator-key"})
+        self.addCleanup(self.reader.close)
 
     def test_metadata_does_not_copy_secrets_and_configuration_remains_unchanged(self) -> None:
         originals = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
@@ -124,15 +128,16 @@ class ModelConfigurationTests(unittest.TestCase):
                                   text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n")
 
         with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
-            with patch("backend.translator_agent.model_config.ChatOpenAI",
-                       side_effect=lambda **options: ChatOpenAI(http_client=transport, **options)):
-                choices = [("codex", "fastest"), ("qwen", "fastest"), ("codex", "medium"),
-                           ("codex", "high"), ("codex", "xhigh"), ("qwen", "thinking")]
-                for provider, reasoning in choices:
-                    client = self.reader.client(provider, timeout=30, reasoning=reasoning)
-                    result = FlowchartAgent(client, max_input_chars=8000).generate("test")
-                    self.assertEqual(result["diagram"]["steps"][0]["title"], "步骤")
-                    self.assertEqual(result["model"], self.reader.read(provider).model)
+            reader = ModelConfigurationReader(self.home, {}, http_client=transport)
+            choices = [("codex", "fastest"), ("qwen", "fastest"), ("codex", "medium"),
+                       ("codex", "high"), ("codex", "xhigh"), ("qwen", "thinking")]
+            for provider, reasoning in choices:
+                client = reader.client(provider, timeout=30, reasoning=reasoning)
+                result = FlowchartAgent(client, max_input_chars=8000).generate("test")
+                self.assertEqual(result["diagram"]["steps"][0]["title"], "步骤")
+                self.assertEqual(result["model"], reader.read(provider).model)
+            reader.close()
+            self.assertFalse(transport.is_closed)
         codex_url, codex_body, codex_auth = requests[0]
         self.assertEqual(str(codex_url), "https://codex.example/v1/responses")
         self.assertEqual(codex_body["reasoning"]["effort"], "low")
@@ -171,6 +176,66 @@ class ModelConfigurationTests(unittest.TestCase):
         for provider, reasoning in [("codex", "thinking"), ("qwen", "high"), ("qwen", None)]:
             with self.assertRaises(ModelConfigurationError):
                 self.reader.client(provider, timeout=30, reasoning=reasoning)
+
+    def test_sdk_reuses_tcp_connection_but_rereads_model_and_authentication(self) -> None:
+        """HTTP/2 retains the socket when the SDK closes its response at the SSE [DONE] marker."""
+        accepted = []
+        requests = []
+
+        class Handler(BaseRequestHandler):
+            def handle(self):
+                accepted.append(self.client_address)
+                connection = H2Connection(config=H2Configuration(client_side=False, header_encoding="utf-8"))
+                connection.initiate_connection()
+                self.request.sendall(connection.data_to_send())
+                streams = {}
+                while data := self.request.recv(65536):
+                    for event in connection.receive_data(data):
+                        if isinstance(event, RequestReceived):
+                            streams[event.stream_id] = [dict(event.headers), bytearray()]
+                        elif isinstance(event, DataReceived):
+                            streams[event.stream_id][1].extend(event.data)
+                            connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+                        elif isinstance(event, StreamEnded):
+                            headers, raw_body = streams.pop(event.stream_id)
+                            body = json.loads(raw_body)
+                            requests.append((body, headers["authorization"]))
+                            chunk = {"id": "chat_test", "object": "chat.completion.chunk", "created": 1,
+                                     "model": body["model"], "choices": [{"index": 0, "delta": {"content": "主译：你好"},
+                                                                           "finish_reason": "stop"}]}
+                            payload = ("data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n").encode()
+                            connection.send_headers(event.stream_id, [(":status", "200"), ("content-type", "text/event-stream")])
+                            connection.send_data(event.stream_id, payload, end_stream=True)
+                    self.request.sendall(connection.data_to_send())
+
+        server = ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        # Plain local H2 avoids test certificates; production negotiates H2 over the configured TLS endpoint.
+        transport = httpx.Client(http1=False, http2=True, trust_env=False)
+        reader = ModelConfigurationReader(self.home, {}, http_client=transport)
+        try:
+            base_url = "http://127.0.0.1:" + str(server.server_address[1]) + "/v1"
+            self.qwen["model"]["baseUrl"] = base_url
+            self.qwen["modelProviders"]["openai"][0]["baseUrl"] = base_url
+            self.qwen_path.write_text(json.dumps(self.qwen))
+            first = reader.client("qwen", timeout=3)
+            self.assertEqual(first.invoke("hello").content, "主译：你好")
+            self.qwen["model"]["name"] = "qwen-updated"
+            self.qwen["modelProviders"]["openai"][0]["id"] = "qwen-updated"
+            self.qwen["env"]["DASHSCOPE_API_KEY"] = "fake-updated-key"
+            self.qwen_path.write_text(json.dumps(self.qwen))
+            second = reader.client("qwen", timeout=3, reasoning="thinking")
+            self.assertEqual("".join(chunk.content for chunk in second.stream("hello")), "主译：你好")
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual([body["model"] for body, _ in requests], ["qwen-test", "qwen-updated"])
+            self.assertEqual([auth for _, auth in requests], ["Bearer fake-qwen-key", "Bearer fake-updated-key"])
+            self.assertEqual([body["enable_thinking"] for body, _ in requests], [False, True])
+        finally:
+            transport.close()
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_local_http_routes_provider_and_exposes_only_metadata(self) -> None:
         reader = self.reader

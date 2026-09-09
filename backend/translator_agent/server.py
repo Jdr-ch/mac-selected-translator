@@ -31,7 +31,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         """Expose service capabilities and allowlisted model metadata, never credentials."""
 
         if self.path == "/health":
-            self._send_json({"ok": True, "capabilities": ["model-switching", "reasoning-selection", "generation-metrics"],
+            self._send_json({"ok": True, "capabilities": ["model-switching", "reasoning-selection", "generation-metrics", "translation-streaming"],
                              "request_timeout_seconds": self.settings.request_timeout_seconds})
             return
         if self.path in ("/models/codex", "/models/qwen"):
@@ -59,6 +59,9 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             text = self._read_text(payload)
             # Older HTTP clients omit provider; their historical Qwen choice remains explicit here.
             agent = self._agent_for_provider(payload.get("provider", "qwen"), payload.get("reasoning", "fastest"))
+            if self.path == "/translate" and payload.get("stream") is True:
+                self._stream_translation(agent, text, payload.get("target_language"))
+                return
             # Measure generation after client setup, including every IPA correction call.
             started = perf_counter()
             if self.path == "/polish":
@@ -88,6 +91,38 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
     def _agent_for_provider(self, provider: object, reasoning: object) -> TranslatorAgent:
         """Bind all calls, including IPA correction, to the same freshly loaded model."""
         return TranslatorAgent(self.models.client(provider, self.settings.request_timeout_seconds, reasoning))
+
+    def _stream_translation(self, agent: TranslatorAgent, text: str, target_language: str | None) -> None:
+        """Flush NDJSON events on the original request; completion alone authorizes history storage."""
+        self.close_connection = True
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        started = perf_counter()
+        try:
+            try:
+                result = agent.translate(text, target_language, on_delta=lambda value:
+                                         self._send_stream_event({"type": "delta", "text": value}))
+                self._send_stream_event({"type": "complete", "translation": result,
+                                         "ai_ms": round((perf_counter() - started) * 1000, 2)})
+            except APITimeoutError:
+                self._send_stream_event({"type": "error", "error": "模型响应超时，请稍后重试。"})
+            except (ValueError, TranslationError) as exc:
+                self._send_stream_event({"type": "error", "error": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                raise
+            except Exception:
+                self._send_stream_event({"type": "error", "error": "翻译请求中断，请检查所选模型的连接后重试。"})
+        except (BrokenPipeError, ConnectionResetError):
+            # A dismissed native panel no longer consumes this request; never start a retry for it.
+            return
+
+    def _send_stream_event(self, payload: dict[str, Any]) -> None:
+        """A line is one complete UTF-8 JSON event, even when model chunks split characters or labels."""
+        self.wfile.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.wfile.flush()
 
     def _generate_flowchart(self) -> None:
         """Keep one-shot diagram generation independent of translation's response policy."""
@@ -186,4 +221,5 @@ def main() -> int:
         print("\n[translator-backend] stopping", file=sys.stderr)
     finally:
         server.server_close()
+        TranslatorRequestHandler.models.close()
     return 0
