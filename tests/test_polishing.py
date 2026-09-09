@@ -69,10 +69,12 @@ class PolishingHTTPTests(unittest.TestCase):
         class Handler(TranslatorRequestHandler):
             """Keep handler dependencies isolated from the application's running backend."""
 
+            def _agent_for_provider(self, provider: object) -> TranslatorAgent:
+                return agent
+
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
-        Handler.agent = agent
         Handler.settings = SimpleNamespace(max_input_chars=8000)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)

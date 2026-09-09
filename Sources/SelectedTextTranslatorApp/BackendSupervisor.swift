@@ -18,13 +18,13 @@ final class BackendSupervisor {
     /// method keeps that startup responsibility inside the app while still
     /// reusing the existing Python backend and configuration loading behavior.
     func ensureBackendRunning() async throws {
-        if await isBackendHealthy() {
+        if try await isBackendHealthy() {
             return
         }
 
         while isEnsuringBackend {
             try await Task.sleep(nanoseconds: 250_000_000)
-            if await isBackendHealthy() {
+            if try await isBackendHealthy() {
                 return
             }
         }
@@ -34,7 +34,7 @@ final class BackendSupervisor {
             isEnsuringBackend = false
         }
 
-        if await isBackendHealthy() {
+        if try await isBackendHealthy() {
             return
         }
 
@@ -52,18 +52,31 @@ final class BackendSupervisor {
         backendLogHandle = nil
     }
 
-    private func isBackendHealthy() async -> Bool {
+    private func isBackendHealthy() async throws -> Bool {
         var request = URLRequest(url: configuration.healthURL)
         request.timeoutInterval = 1.2
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 return false
             }
-            return (200..<300).contains(httpResponse.statusCode)
+            guard (200..<300).contains(httpResponse.statusCode) else { return false }
+            try Self.validateCapabilities(data)
+            return true
+        } catch let error as TranslatorAppError {
+            throw error
         } catch {
             return false
+        }
+    }
+
+    /// Do not send a Codex request to an older running service that silently ignores provider.
+    static func validateCapabilities(_ data: Data) throws {
+        struct Health: Decodable { let capabilities: [String]? }
+        let health = try? JSONDecoder().decode(Health.self, from: data)
+        guard health?.capabilities?.contains("model-switching") == true else {
+            throw TranslatorAppError.backendError("当前本地服务不支持模型切换，请退出旧版 App 及其服务后重新启动。")
         }
     }
 
@@ -127,14 +140,14 @@ final class BackendSupervisor {
 
     private func waitUntilHealthy() async throws {
         for _ in 0..<30 {
-            if await isBackendHealthy() {
+            if try await isBackendHealthy() {
                 return
             }
 
             if let ownedProcess, !ownedProcess.isRunning {
                 self.ownedProcess = nil
                 throw TranslatorAppError.backendStartupFailed(
-                    "本地翻译服务提前退出，请检查钥匙串、.env 或环境变量中的 DASHSCOPE_API_KEY，或查看 /tmp/selected-text-translator-backend.log。"
+                    "本地翻译服务提前退出，请检查 Python 依赖，或查看 /tmp/selected-text-translator-backend.log。"
                 )
             }
 

@@ -15,14 +15,21 @@ struct FlowchartTests {
         let blank = create()
         #expect(blank.state.input.isEmpty)
         #expect(blank.state.document == .empty)
-        var legacy = FlowchartSession.SavedState(
+        struct LegacySavedState: Codable {
+            var input: String
+            var document: FlowchartDocument
+            var style: FlowchartStyle
+            var model: String
+            var recentModels: [String]
+        }
+        var legacy = LegacySavedState(
             input: "描述编译型语言的执行过程：语言文件-编译器-汇编代码-汇编器-二进制机器码-链接器-可执行exe文件",
             document: .example, style: .staircase, model: "diagram-model", recentModels: ["diagram-model"])
         defaults.set(try JSONEncoder().encode(legacy), forKey: "flowchart.document.v1")
         let migrated = create()
         #expect(migrated.state.input.isEmpty)
         #expect(migrated.state.document == .empty)
-        #expect(migrated.state.model == "diagram-model")
+        #expect(migrated.provider == .qwen)
         #expect(migrated.state.style == .staircase)
         legacy.document.steps[0].description = "用户自己的说明"
         defaults.set(try JSONEncoder().encode(legacy), forKey: "flowchart.document.v1")
@@ -58,33 +65,36 @@ struct FlowchartTests {
         session.edit { $0.document = .example; $0.input = "我的编译流程" }
         let second = session.state.document.steps[1].id
         session.moveStep(id: second, offset: -1)
-        session.edit { $0.style = .staircase; $0.model = "diagram-fast"; $0.document.title = "编辑后的标题" }
+        session.edit { $0.style = .staircase; $0.document.title = "编辑后的标题" }
+        session.selectProvider(.codex)
         #expect(session.state.document.steps[0].title == "编译器")
         #expect(calls == 0)
         let restored = FlowchartSession(defaults: defaults) { _, _ in throw FlowchartError.message("not called") }
         #expect(restored.state.style == .staircase)
-        #expect(restored.state.model == "diagram-fast")
+        #expect(restored.provider == .qwen)
         #expect(restored.state.document.title == "编辑后的标题")
         #expect(restored.state.document.steps.map(\.title) == session.state.document.steps.map(\.title))
     }
 
     @Test @MainActor
-    func generationCapturesModelAndFailureKeepsDocument() async throws {
+    func generationCapturesProviderAndFailureKeepsDocument() async throws {
         let name = "FlowchartTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        var suppliedModel: String?
+        var suppliedProvider: ModelProvider?
         var shouldFail = false
-        let session = FlowchartSession(defaults: defaults) { _, model in
-            suppliedModel = model
+        let session = FlowchartSession(defaults: defaults) { _, provider in
+            suppliedProvider = provider
             if shouldFail { throw FlowchartError.message("模型不可用") }
-            return FlowchartResponse(diagram: .example, model: model ?? "default-model", aiMS: 123)
+            return FlowchartResponse(diagram: .example, model: provider.rawValue, aiMS: 123)
         }
-        session.edit { $0.model = "diagram-fast"; $0.input = "语言文件 → 编译器" }
+        session.edit { $0.input = "语言文件 → 编译器" }
+        session.selectProvider(.codex)
         session.generate()
+        session.selectProvider(.qwen)
         while session.isGenerating { await Task.yield() }
-        #expect(suppliedModel == "diagram-fast")
-        #expect(session.state.recentModels.first == "diagram-fast")
+        #expect(suppliedProvider == .codex)
+        #expect(session.provider == .qwen)
         #expect(session.lastAIMS == 123)
         let previous = session.state.document
         shouldFail = true
@@ -111,7 +121,7 @@ struct FlowchartTests {
         try await Task.sleep(nanoseconds: 150_000_000)
         #expect(!session.isGenerating)
         #expect(session.state.document.title == "取消后保留的编辑")
-        #expect(session.state.recentModels.isEmpty)
+        #expect(session.lastAIMS == nil)
     }
 
     @Test @MainActor
@@ -212,7 +222,9 @@ struct FlowchartTests {
         defer { defaults.removePersistentDomain(forName: name) }
         let configuration = AppConfiguration(environment: ["TRANSLATOR_BACKEND_URL": "http://127.0.0.1:1"])
         var revealedURL: URL?
+        let globalSelection = ModelSelectionStore(defaults: defaults)
         let controller = FlowchartWindowController(configuration: configuration, defaults: defaults,
+                                                   defaultProvider: { globalSelection.provider },
                                                    revealExport: { revealedURL = $0 }) {}
         let window = try #require(controller.window)
         let content = try #require(window.contentView)
@@ -252,8 +264,28 @@ struct FlowchartTests {
                 }
             }
         }
+        let modelBox = try #require(Self.controls(in: content).compactMap { $0 as? NSPopUpButton }
+            .first { $0.itemTitles == ["Codex", "Qwen"] })
+        let documentBeforeOpening = controller.session.state.document
+        globalSelection.select(.codex)
         controller.showWindow()
+        #expect(modelBox.titleOfSelectedItem == "Codex")
+        modelBox.selectItem(withTitle: "Qwen")
+        #expect(modelBox.sendAction(modelBox.action, to: modelBox.target))
+        #expect(controller.session.provider == .qwen)
+        #expect(globalSelection.provider == .codex)
         controller.showWindow()
+        modelBox.menu?.update()
+        #expect(modelBox.titleOfSelectedItem == "Qwen")
+        window.close()
+        controller.showWindow()
+        #expect(modelBox.titleOfSelectedItem == "Codex")
+        globalSelection.select(.qwen)
+        #expect(controller.session.provider == .codex)
+        window.close()
+        controller.showWindow()
+        #expect(modelBox.titleOfSelectedItem == "Qwen")
+        #expect(controller.session.state.document == documentBeforeOpening)
         #expect(controller.window === window)
         #expect(window.isVisible)
         try await controller.preview.render(controller.session.state.document, style: .horizontal)
@@ -424,9 +456,8 @@ struct FlowchartTests {
         defer { supervisor.terminateOwnedBackend() }
         try await supervisor.ensureBackendRunning()
         let client = FlowchartClient(configuration: configuration)
-        #expect(!(try await client.defaultModel()).isEmpty)
         do {
-            _ = try await client.generate(text: "", model: nil)
+            _ = try await client.generate(text: "", provider: .qwen)
             Issue.record("Empty input should not reach the model")
         } catch {
             #expect(error.localizedDescription == "请输入流程描述。")

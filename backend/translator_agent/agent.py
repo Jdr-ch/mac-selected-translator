@@ -14,7 +14,6 @@ import jieba
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from .config import Settings
 from .polishing import polish_messages
 
 
@@ -45,24 +44,10 @@ class TranslationError(RuntimeError):
 
 
 class TranslatorAgent:
-    """Small LangChain-backed agent that translates text with Qwen.
+    """Keep translation/polishing policy independent of the selected provider's client."""
 
-    The Qwen thinking switch is passed through `extra_body` because DashScope's
-    OpenAI-compatible endpoint accepts provider-specific request fields there.
-    Translation is latency-sensitive, so thinking mode is disabled by default.
-    """
-
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
-        self._llm = ChatOpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-            model=settings.model,
-            temperature=0,
-            timeout=settings.request_timeout_seconds,
-            max_retries=1,
-            extra_body={"enable_thinking": False},
-        )
+    def __init__(self, client: ChatOpenAI) -> None:
+        self._llm = client
 
     def translate(self, text: str, target_language: str | None = None) -> str:
         """Translate selected text and return the model's final content.
@@ -106,7 +91,7 @@ class TranslatorAgent:
         """Rewrite original text using the existing configured model and a separate prompt policy."""
 
         messages = polish_messages(text, role, scenario, tone)
-        response = self._llm.invoke(messages)
+        response = self._request_model(messages)
         content = self._coerce_content(response.content).strip()
         if not content:
             raise TranslationError("模型返回了空润色结果，请重试。")
@@ -176,13 +161,20 @@ class TranslatorAgent:
         )
 
     def _invoke(self, messages: list[BaseMessage]) -> str:
-        """Invoke Qwen and normalize the response into a non-empty string."""
+        """Invoke the request's selected model and normalize its final answer."""
 
-        response = self._llm.invoke(messages)
+        response = self._request_model(messages)
         content = self._coerce_content(response.content).strip()
         if not content:
             raise TranslationError("模型返回了空译文。")
         return content
+
+    def _request_model(self, messages: list[BaseMessage]) -> BaseMessage:
+        """Keep SDK failures out of validation responses, which are otherwise shown verbatim."""
+        try:
+            return self._llm.invoke(messages)
+        except Exception:
+            raise RuntimeError("Model request failed") from None
 
     def _retry_with_phonetics(self, messages: list[BaseMessage], content: str) -> str:
         """Retry once when a short selection omits or misplaces the IPA line."""

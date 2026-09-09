@@ -32,9 +32,11 @@ enum TranslatorAppError: LocalizedError {
 struct TranslateRequest: Encodable {
     let text: String
     let targetLanguage: String
+    let provider: ModelProvider
 
     enum CodingKeys: String, CodingKey {
         case text
+        case provider
         case targetLanguage = "target_language"
     }
 }

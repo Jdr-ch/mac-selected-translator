@@ -28,6 +28,7 @@ load_keychain_api_key_if_unset() {
 # Keychain value cannot be overwritten by local development defaults.
 load_env_if_unset() {
   local env_file="${1:-.env}"
+  local runtime_only="${2:-false}"
 
   [[ -f "${env_file}" ]] || return 0
 
@@ -49,6 +50,13 @@ load_env_if_unset() {
 
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
 
+    if [[ "${runtime_only}" == "true" ]]; then
+      case "${key}" in
+        TRANSLATOR_BACKEND_HOST|TRANSLATOR_BACKEND_PORT|TRANSLATOR_BACKEND_URL|TRANSLATOR_PROJECT_ROOT|TRANSLATOR_MAX_INPUT_CHARS|QWEN_REQUEST_TIMEOUT_SECONDS) ;;
+        *) continue ;;
+      esac
+    fi
+
     # The user's shell environment is the source of truth. `.env` only fills
     # missing local defaults so placeholder values cannot hide a real API key.
     if [[ -z "${!key+x}" ]]; then
@@ -63,13 +71,8 @@ load_env_if_unset() {
   done < "${env_file}"
 }
 
-# Apply the complete startup precedence shared by Finder and terminal launchers.
+# Model settings now belong to the CLIs; legacy .env/Keychain values must not shadow them.
 load_translator_configuration() {
   local env_file="${1:-.env}"
-
-  # Finder-launched apps have no interactive shell environment. Keychain is
-  # the secure persistent fallback, while `.env` remains compatible for users
-  # who intentionally keep local development defaults there.
-  load_keychain_api_key_if_unset
-  load_env_if_unset "${env_file}"
+  load_env_if_unset "${env_file}" true
 }

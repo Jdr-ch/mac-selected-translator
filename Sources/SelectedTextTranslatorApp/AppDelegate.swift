@@ -5,6 +5,8 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let backendClient: BackendClient
     private let backendSupervisor: BackendSupervisor
+    private let modelSelection: ModelSelectionStore
+    private let modelWindowController: ModelSelectionWindowController
     private let selectionReader = AccessibilitySelectionReader()
     private let floatingPanel = FloatingPanelController()
     private let windowLayoutController = WindowLayoutController()
@@ -24,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItemMouseMonitor: Any?
     /// Retained so the status-menu label follows both the menu toggle and the green indicator.
     private var sleepMenuItem: NSMenuItem?
+    private var modelMenuItem: NSMenuItem?
     /// Drives the faster icon rhythm for the lifetime of one translation request.
     private var isTranslating = false {
         didSet {
@@ -40,12 +43,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         let client = self.backendClient
         let supervisor = self.backendSupervisor
+        let selection = ModelSelectionStore()
+        self.modelSelection = selection
+        self.modelWindowController = ModelSelectionWindowController(
+            session: ModelSelectionSession(selection: selection) { provider in
+                try await supervisor.ensureBackendRunning()
+                try Task.checkCancellation()
+                return try await client.modelInformation(for: provider)
+            }
+        )
         self.polishWindowController = ContentPolishWindowController(session: ContentPolishSession { request in
+            let provider = selection.provider
             try await supervisor.ensureBackendRunning()
             try Task.checkCancellation()
-            return try await client.polish(request)
+            return try await client.polish(request, provider: provider)
         })
         super.init()
+        selection.onChange = { [weak self] in self?.updateModelMenu() }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -70,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         flowchartWindowController?.shutdown()
         polishSelectionTask?.cancel()
         polishWindowController.session.cancel()
+        modelWindowController.session.cancel()
         sleepPreventionController.restoreSystemSleep()
         backendSupervisor.terminateOwnedBackend()
     }
@@ -114,7 +129,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
         menu.addItem(makeMenuItem(title: "查看快捷键状态", action: #selector(showHotkeyStatus)))
         menu.addItem(makeMenuItem(title: "检查辅助功能权限", action: #selector(checkAccessibilityPermission)))
-        menu.addItem(makeMenuItem(title: "检查/启动本地翻译服务", action: #selector(checkBackendService)))
+        let modelMenuItem = makeMenuItem(title: "", action: #selector(showModelSelection))
+        self.modelMenuItem = modelMenuItem
+        updateModelMenu()
+        menu.addItem(modelMenuItem)
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         statusItem = item
@@ -225,10 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Starts the backend shortly after app launch so the first hotkey feels instant.
     ///
-    /// Errors are surfaced in the same floating panel used by translation
-    /// failures. That gives Finder-launched `.app` users a visible reason when
-    /// `.env` is missing an API key or the Python virtual environment has not
-    /// been created yet.
+    /// Only the HTTP service is warmed up; model configuration is read when a request starts.
     private func warmUpBackend() {
         Task { @MainActor in
             do {
@@ -261,6 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// whether the failure happened in macOS text capture, local backend
     /// connectivity, or the remote model request.
     private func translateCurrentSelection() async {
+        let provider = modelSelection.provider
         isTranslating = true
         floatingPanel.showLoading("正在读取选中文字...")
         defer {
@@ -272,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try await backendSupervisor.ensureBackendRunning()
             let selectedText = try await selectionReader.readSelectedText()
             floatingPanel.showLoading("正在翻译...")
-            let translation = try await backendClient.translate(selectedText, targetLanguage: "auto")
+            let translation = try await backendClient.translate(selectedText, targetLanguage: "auto", provider: provider)
             floatingPanel.showResult(translation, sourceText: selectedText)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -329,7 +345,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Opens a retained editor instead of starting another app or replacing translation state.
     @objc private func showFlowchart() {
         if flowchartWindowController == nil {
-            flowchartWindowController = FlowchartWindowController { [weak self] in
+            flowchartWindowController = FlowchartWindowController(defaultProvider: { [modelSelection] in
+                modelSelection.provider
+            }) { [weak self] in
                 guard let self else { throw CancellationError() }
                 try await self.backendSupervisor.ensureBackendRunning()
             }
@@ -392,17 +410,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func checkBackendService() {
-        Task { @MainActor in
-            do {
-                floatingPanel.showLoading("正在检查本地翻译服务...")
-                try await backendSupervisor.ensureBackendRunning()
-                floatingPanel.showResult("本地翻译服务已就绪。")
-            } catch {
-                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                floatingPanel.showError(message)
-            }
-        }
+    private func updateModelMenu() {
+        modelMenuItem?.title = "模型切换：\(modelSelection.provider.title)..."
+    }
+
+    @objc private func showModelSelection() {
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        modelWindowController.show(on: screen)
     }
 
     @objc private func quit() {

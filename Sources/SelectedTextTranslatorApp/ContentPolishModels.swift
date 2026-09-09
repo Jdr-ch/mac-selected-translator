@@ -51,12 +51,15 @@ struct PolishRequest: Encodable, Equatable {
     let role: String
     let scenario: String
     let tone: PolishTone
+    /// Added only at the HTTP boundary; session draft/result equality stays provider-independent.
+    let provider: ModelProvider?
 
-    init(text: String, preferences: PolishPreferences) {
+    init(text: String, preferences: PolishPreferences, provider: ModelProvider? = nil) {
         self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         self.role = preferences.role.trimmingCharacters(in: .whitespacesAndNewlines)
         self.scenario = preferences.scenario.trimmingCharacters(in: .whitespacesAndNewlines)
         self.tone = preferences.tone
+        self.provider = provider
     }
 
     /// Mirrors the required fields and 100-character context limit in the local API.

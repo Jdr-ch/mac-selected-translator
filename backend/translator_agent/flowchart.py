@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 import json
 import re
 from time import perf_counter
@@ -10,9 +9,6 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-
-from .config import Settings
-
 
 # These names match the bundled diagram icons; model output never supplies SVG or URLs.
 ICON_IDS = {"file-text", "cpu", "code", "settings", "link", "play", "check"}
@@ -81,28 +77,18 @@ def validate_diagram(value: Any, locked_steps: list[str] | None = None) -> dict[
 
 
 class FlowchartAgent:
-    """Share provider credentials while keeping diagram models separate from translation."""
+    """Generate with one CLI configuration snapshot selected by the flowchart panel."""
 
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
+    def __init__(self, client: ChatOpenAI, max_input_chars: int) -> None:
+        self.client = client
+        self.max_input_chars = max_input_chars
 
-    @lru_cache(maxsize=8)
-    def _client(self, model: str) -> ChatOpenAI:
-        """Reuse clients across generations; no automatic model retry adds hidden latency."""
-        extra_body = {"enable_thinking": False} if "qwen" in model.lower() else {}
-        return ChatOpenAI(api_key=self.settings.api_key, base_url=self.settings.base_url,
-                          model=model, temperature=0, timeout=self.settings.request_timeout_seconds,
-                          max_retries=0, extra_body=extra_body)
-
-    def generate(self, text: str, model: str | None = None) -> dict[str, Any]:
+    def generate(self, text: str) -> dict[str, Any]:
         """Make one AI call and report its elapsed time separately from local drawing."""
         if not isinstance(text, str) or not text.strip():
             raise FlowchartError("请输入流程描述。")
-        if len(text) > self.settings.max_input_chars:
-            raise FlowchartError(f"流程描述超过 {self.settings.max_input_chars} 字符，请缩短后生成。")
-        if model is not None and (not isinstance(model, str) or not model.strip()):
-            raise FlowchartError("模型名称必须是非空字符串。")
-        selected_model = model.strip() if model is not None else self.settings.model
+        if len(text) > self.max_input_chars:
+            raise FlowchartError(f"流程描述超过 {self.max_input_chars} 字符，请缩短后生成。")
         locked = explicit_steps(text)
         contract = {
             "title": "流程标题", "subtitle": "简短说明",
@@ -123,9 +109,13 @@ class FlowchartAgent:
             prompt += ("必须逐字保留以下步骤名称及顺序，不能合并、增加、删除或改名："
                        + json.dumps(locked, ensure_ascii=False))
         started = perf_counter()
-        response = self._client(selected_model).invoke([
-            SystemMessage(content=prompt), HumanMessage(content=text.strip())
-        ])
+        try:
+            response = self.client.invoke([
+                SystemMessage(content=prompt), HumanMessage(content=text.strip())
+            ])
+        except Exception:
+            # SDK errors can embed endpoint credentials or request data.
+            raise FlowchartError("流程解析请求失败，请检查所选模型的连接和认证配置。") from None
         elapsed_ms = round((perf_counter() - started) * 1000, 2)
         content = response.content
         if isinstance(content, list):
@@ -140,4 +130,4 @@ class FlowchartAgent:
             diagram = validate_diagram(json.loads(clean), locked)
         except json.JSONDecodeError as exc:
             raise FlowchartError("模型返回的 JSON 无法解析，请重新生成。") from exc
-        return {"diagram": diagram, "model": selected_model, "ai_ms": elapsed_ms}
+        return {"diagram": diagram, "model": self.client.model_name, "ai_ms": elapsed_ms}

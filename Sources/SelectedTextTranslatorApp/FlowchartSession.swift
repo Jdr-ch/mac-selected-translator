@@ -7,33 +7,36 @@ final class FlowchartSession {
         var input: String
         var document: FlowchartDocument
         var style: FlowchartStyle
-        // Empty means follow the service's current default; an explicit name only affects flowcharts.
-        var model: String
-        var recentModels: [String]
     }
 
     private(set) var state: SavedState
+    private(set) var provider: ModelProvider
+    private var isPresented = false
     private(set) var isGenerating = false
     private(set) var status = ""
     private(set) var hasError = false
     private(set) var lastAIMS: Double?
     var onChange: (() -> Void)?
     private let defaults: UserDefaults
-    private let generateResponse: (String, String?) async throws -> FlowchartResponse
+    private let defaultProvider: () -> ModelProvider
+    private let generateResponse: (String, ModelProvider) async throws -> FlowchartResponse
     private var task: Task<Void, Never>?
     // Each cancel/new generation invalidates late results even when the upstream call cannot stop.
     private var generation = 0
     private static let storageKey = "flowchart.document.v1"
 
     init(defaults: UserDefaults = .standard,
-         generateResponse: @escaping (String, String?) async throws -> FlowchartResponse) {
+         defaultProvider: @escaping () -> ModelProvider = { .qwen },
+         generateResponse: @escaping (String, ModelProvider) async throws -> FlowchartResponse) {
         self.defaults = defaults
+        self.defaultProvider = defaultProvider
+        provider = defaultProvider()
         self.generateResponse = generateResponse
         if let data = defaults.data(forKey: Self.storageKey),
            let saved = try? JSONDecoder().decode(SavedState.self, from: data) {
             state = saved
         } else {
-            state = SavedState(input: "", document: .empty, style: .horizontal, model: "", recentModels: [])
+            state = SavedState(input: "", document: .empty, style: .horizontal)
         }
         if Self.isUntouchedExample(state) {
             state.input = ""
@@ -42,7 +45,7 @@ final class FlowchartSession {
         }
     }
 
-    /// Remove only the old bundled seed; edited documents and independent model/style choices survive.
+    /// Remove only the old bundled seed; edited documents and style choices survive.
     private static func isUntouchedExample(_ saved: SavedState) -> Bool {
         guard saved.input == "描述编译型语言的执行过程：语言文件-编译器-汇编代码-汇编器-二进制机器码-链接器-可执行exe文件" else { return false }
         let encoder = JSONEncoder()
@@ -59,11 +62,22 @@ final class FlowchartSession {
         onChange?()
     }
 
-    /// Record a successful model, retaining the editable history only for this feature.
-    private func rememberModel(_ model: String) {
-        state.recentModels.removeAll { $0 == model }
-        state.recentModels.insert(model, at: 0)
-        state.recentModels = Array(state.recentModels.prefix(8))
+    /// Follow the global choice once per opening, preserving local selection when brought forward.
+    func beginPresentation() {
+        guard !isPresented else { return }
+        isPresented = true
+        selectProvider(defaultProvider())
+    }
+
+    func endPresentation() {
+        isPresented = false
+        cancel()
+    }
+
+    /// This choice lives only in the editor session and never writes global preferences.
+    func selectProvider(_ provider: ModelProvider) {
+        self.provider = provider
+        onChange?()
     }
 
     /// Generate once from a snapshot; only the still-current request may publish a new document.
@@ -74,20 +88,19 @@ final class FlowchartSession {
             report("请输入流程描述。", isError: true)
             return
         }
-        let model = state.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let provider = self.provider
         generation += 1
         let requestGeneration = generation
         isGenerating = true
         report("正在理解流程…", isError: false)
         task = Task { [weak self, generateResponse] in
             do {
-                let result = try await generateResponse(input, model.isEmpty ? nil : model)
+                let result = try await generateResponse(input, provider)
                 try Task.checkCancellation()
                 try result.diagram.validate()
                 guard let self, self.generation == requestGeneration else { return }
                 self.state.document = result.diagram
                 self.lastAIMS = result.aiMS
-                self.rememberModel(result.model)
                 self.isGenerating = false
                 self.task = nil
                 self.persist()

@@ -3,12 +3,11 @@ import UniformTypeIdentifiers
 
 /// Retained menu tool with native editing controls and one local SVG rendering surface.
 @MainActor
-final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSComboBoxDelegate {
+final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate {
     let session: FlowchartSession
     let preview = FlowchartPreview()
-    private let client: FlowchartClient
     private let inputView = NSTextView()
-    private let modelBox = NSComboBox()
+    private let modelBox = NSPopUpButton()
     private let titleField = NSTextField(string: "")
     private let subtitleField = NSTextField(string: "")
     private let stepsStack = FlowchartStepListView()
@@ -32,21 +31,20 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
     private var isExporting = false
     private var previewReady = false
     private var didPositionWindow = false
-    private var defaultModel = ""
     // Retain the last successfully written file so reopening the window can still reveal its location.
     private(set) var lastExportURL: URL?
     private let revealExport: (URL) -> Void
 
     init(configuration: AppConfiguration = AppConfiguration(), defaults: UserDefaults = .standard,
+         defaultProvider: @escaping () -> ModelProvider = { .qwen },
          revealExport: @escaping (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) },
          ensureBackend: @escaping () async throws -> Void) {
         let client = FlowchartClient(configuration: configuration)
-        self.client = client
         self.revealExport = revealExport
-        session = FlowchartSession(defaults: defaults) { text, model in
+        session = FlowchartSession(defaults: defaults, defaultProvider: defaultProvider) { text, provider in
             try await ensureBackend()
             try Task.checkCancellation()
-            return try await client.generate(text: text, model: model)
+            return try await client.generate(text: text, provider: provider)
         }
         let window = FlowchartWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -67,6 +65,7 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Reopening preserves the same document, render process, and user-adjusted window dimensions.
     func showWindow() {
+        session.beginPresentation()
         if !didPositionWindow, let window {
             let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
                 ?? NSScreen.main
@@ -82,19 +81,13 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        Task { [weak self] in
-            guard let self, let model = try? await client.defaultModel() else { return }
-            defaultModel = model
-            modelBox.placeholderString = "默认：\(model)"
-            refreshModels()
-        }
     }
 
-    func windowWillClose(_ notification: Notification) { session.cancel() }
+    func windowWillClose(_ notification: Notification) { session.endPresentation() }
 
     /// App shutdown cancels this feature's waiting tasks without touching other tools or services.
     func shutdown() {
-        session.cancel()
+        session.endPresentation()
         renderTask?.cancel()
     }
 
@@ -110,9 +103,10 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
         inputView.autoresizingMask = [.width]
         inputView.textContainer?.widthTracksTextView = true
         inputView.delegate = self
-        modelBox.placeholderString = "使用服务默认模型"
-        modelBox.completes = false
-        modelBox.delegate = self
+        modelBox.addItems(withTitles: ModelProvider.allCases.map(\.title))
+        modelBox.target = self
+        modelBox.action = #selector(modelChanged)
+        modelBox.setAccessibilityLabel("流程图模型")
         titleField.placeholderString = "输入图表标题"
         titleField.font = .systemFont(ofSize: 14, weight: .semibold)
         subtitleField.placeholderString = "可选"
@@ -272,24 +266,14 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
         if inputView.string != state.input { inputView.string = state.input }
         if titleField.stringValue != state.document.title { titleField.stringValue = state.document.title }
         if subtitleField.stringValue != state.document.subtitle { subtitleField.stringValue = state.document.subtitle }
-        if modelBox.stringValue != state.model { modelBox.stringValue = state.model }
+        modelBox.selectItem(at: ModelProvider.allCases.firstIndex(of: session.provider) ?? 0)
         styleControl.selectedSegment = FlowchartStyle.allCases.firstIndex(of: state.style) ?? 0
-        refreshModels()
         refreshRows()
         updateEnabledState()
         statusLabel.stringValue = session.status
         statusLabel.toolTip = session.status
         statusLabel.textColor = session.hasError ? .systemRed : .secondaryLabelColor
         if renderedDocument != state.document || renderedStyle != state.style { scheduleRender() }
-    }
-
-    private func refreshModels() {
-        let items = ([defaultModel] + session.state.recentModels).filter { !$0.isEmpty }
-            .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-        if modelBox.objectValues.compactMap({ $0 as? String }) != items {
-            modelBox.removeAllItems()
-            modelBox.addItems(withObjectValues: items)
-        }
     }
 
     private func refreshRows() {
@@ -377,14 +361,12 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
             session.edit { $0.document.title = titleField.stringValue }
         } else if notification.object as? NSTextField === subtitleField {
             session.edit { $0.document.subtitle = subtitleField.stringValue }
-        } else if notification.object as? NSComboBox === modelBox {
-            session.edit { $0.model = modelBox.stringValue }
         }
     }
 
-    func comboBoxSelectionDidChange(_ notification: Notification) {
-        guard let model = modelBox.objectValueOfSelectedItem as? String else { return }
-        session.edit { $0.model = model }
+    @objc private func modelChanged() {
+        guard ModelProvider.allCases.indices.contains(modelBox.indexOfSelectedItem) else { return }
+        session.selectProvider(ModelProvider.allCases[modelBox.indexOfSelectedItem])
     }
 
     @objc private func generate() { session.generate() }

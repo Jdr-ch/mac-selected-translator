@@ -1,6 +1,6 @@
 # Mac Selected Translator
 
-一个本机 macOS 划词翻译原型：选中文字后按 `Option+Tab`，在鼠标附近弹出翻译浮层。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调 OpenAI-compatible Qwen。
+一个本机 macOS 划词翻译原型：选中文字后按 `Option+Tab`，在鼠标附近弹出翻译浮层。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调用 Codex 或 Qwen 的既有配置。
 
 ## 功能
 
@@ -8,7 +8,9 @@
 - 优先通过 macOS Accessibility API 读取当前选中文字。
 - 对不暴露选中属性的 App，临时执行 `Command+C` 读取剪贴板，并尽量恢复原剪贴板内容。
 - 通过本地 HTTP 服务调用 LangChain `ChatOpenAI`。
-- 默认模型为 `qwen3.7-max`，默认关闭 Qwen thinking 以降低翻译延迟。
+- 菜单中的“模型切换”提供 Codex / Qwen tabs；点击立即成为翻译和润色的全局默认，重启后保留选择。
+- 面板只显示模型名称和配置来源。模型、endpoint、认证及 Thinking/推理参数从各自 CLI 配置读取，App 不保存另一套配置。
+- 生成流程图每次重新打开时默认选择当前全局模型；面板内的 Codex / Qwen 下拉选择只影响本次流程图，保留当前图表、编辑和导出功能。
 - 自动判断中英文方向：英文译中文，中文译英文，并给出常用候选译法。
 - 选中文本不超过 5 个词时，在主译后显示英文原词或英文主译中每个单词的 IPA 音标。
 - 翻译结果以浮层显示在鼠标附近，候选词带浅色背景，点击候选词即可复制并关闭浮层。
@@ -20,12 +22,20 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 ./scripts/setup.sh
 ```
 
-推荐把 API Key 保存到 macOS 钥匙串，避免在 `.env` 中明文保存：
+## 模型来源
 
-```bash
-export DASHSCOPE_API_KEY=你的APIKey
-./scripts/store_api_key_in_keychain.sh
-```
+| Tab | 配置来源 | 认证来源 |
+| --- | --- | --- |
+| Codex | `~/.codex/config.toml` 的当前 model、provider、wire_api 和推理参数 | provider 指定的 `env_key`；未指定时读取 `~/.codex/auth.json` 的 `OPENAI_API_KEY` |
+| Qwen | `~/.qwen/settings.json` 的 `model.name`、`model.baseUrl` 及匹配的 `modelProviders.openai` 配置 | 匹配项的 `envKey`，优先在该文件的 `env` 中解析，否则读取进程环境 |
+
+当前支持两者的 API Key 接入；不将 CLI 的 OAuth 登录态当作 API Key 使用。Qwen 使用模型名与 Base URL 同时匹配，避免同名的标准服务与 Coding Plan 混用密钥。
+
+首次默认选择 Qwen。打开面板、切换 tab、重新激活面板以及每次模型请求都会重新读取源配置；源配置错误时显示提示，不自动换用其他模型。请求开始后使用固定配置快照。App 只在 UserDefaults 中保存 `modelSelection.provider`，不改写上述文件或钥匙串。
+
+`.env` 只加载本地服务运行参数，旧的 `QWEN_MODEL`、`DASHSCOPE_BASE_URL` 和密钥配置不再作为模型来源。
+
+流程图通过 `/flowchart` 的 `provider` 字段使用同一配置读取链路，不再保存或发送自定义模型名。面板保持打开时，再次展开下拉框或从菜单唤起不会重置局部选择；关闭后重开才跟随最新全局选择。
 
 ## iPhone 定位
 
@@ -38,24 +48,6 @@ export DASHSCOPE_API_KEY=你的APIKey
 ```
 
 在 Xcode 中选择已连接的 iPhone 运行一次，并在手机上允许定位。之后 Mac 面板可以自动启动伴生 App 并读取当前坐标。
-
-然后编辑 `.env` 中的非敏感配置：
-
-```bash
-QWEN_MODEL=qwen3.7-max
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-```
-
-如果你的阿里云账号使用 Model Studio 工作空间 endpoint，把 `DASHSCOPE_BASE_URL` 改成控制台给出的完整 OpenAI-compatible `/v1` 地址。
-
-开发时也可以只从当前 shell 环境读取：
-
-```bash
-export DASHSCOPE_API_KEY=你的APIKey
-./scripts/run_dev.sh
-```
-
-启动脚本按“当前进程环境 > macOS 钥匙串 > `.env`”的顺序读取 API Key；`.env` 只用于最后兜底和补充非敏感配置。
 
 ## 启动
 
@@ -80,13 +72,9 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 ./scripts/open_app.sh
 ```
 
-这个 App 会自动检查并启动本地 Python 翻译服务。Finder 双击启动时通常不会继承终端里的 `export DASHSCOPE_API_KEY=...`，因此会自动从 macOS 钥匙串读取已保存的 Key：
+这个 App 会自动检查并启动本地 Python 服务，菜单不再提供手动检查/启动入口。服务启动不依赖模型凭证，读取配置或发起请求时才检查所选模型。
 
-```bash
-./scripts/store_api_key_in_keychain.sh
-```
-
-钥匙串内容会跨注销和重启保留。API Key 失效或轮换后，重新运行该脚本即可覆盖旧值。
+若旧版 App 启动的后端仍占用同一端口，需先退出旧版 App 及其服务。新 App 会检查后端的模型切换能力，避免旧服务忽略 Codex 选择而实际调用 Qwen。
 
 ### 开发模式
 
@@ -164,13 +152,6 @@ TRANSLATOR_BACKEND_PORT=8766
 TRANSLATOR_BACKEND_URL=http://127.0.0.1:8766
 ```
 
-### Qwen 返回模型或 endpoint 错误
+### 模型配置读取失败
 
-检查 `QWEN_MODEL`、`DASHSCOPE_BASE_URL` 和 API Key 是否属于同一个阿里云账号/工作空间。`qwen3.7-max` 若在你的账号下要求工作空间 endpoint，需要使用控制台提供的 workspace OpenAI-compatible `/v1` 地址。
-
-更新 API Key：
-
-```bash
-export DASHSCOPE_API_KEY=新的APIKey
-./scripts/store_api_key_in_keychain.sh
-```
+检查面板所示的 `.codex/config.toml` 或 `.qwen/settings.json`，在对应 CLI 中维护配置后重新打开面板。界面不会展示密钥、提供编辑入口或用旧配置兜底。

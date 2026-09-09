@@ -10,5 +10,5 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ ! -f "${ROOT_DIR}/.env" ]]; then
   cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
-  echo "已创建 ${ROOT_DIR}/.env，请运行 scripts/store_api_key_in_keychain.sh 或在 .env 中填入 DASHSCOPE_API_KEY。"
+  echo "已创建 ${ROOT_DIR}/.env。本文件仅配置本地服务，模型配置从 ~/.codex 和 ~/.qwen 读取。"
 fi

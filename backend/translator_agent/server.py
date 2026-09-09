@@ -10,26 +10,32 @@ from typing import Any
 
 from .agent import TranslationError, TranslatorAgent
 from .config import ConfigError, Settings
+from .model_config import ModelConfigurationReader
 from .flowchart import FlowchartAgent, FlowchartError
 
 
 class TranslatorRequestHandler(BaseHTTPRequestHandler):
     """HTTP endpoints consumed by the Swift floating translator.
 
-    The handler stores `agent` and `settings` as class attributes so the
-    ThreadingHTTPServer can create lightweight request instances without
-    rebuilding the LangChain client for every selected-text translation.
+    Each request resolves one fresh configuration snapshot; switching the app's
+    default never changes an in-flight request or the CLI's configuration files.
     """
 
-    agent: TranslatorAgent
     settings: Settings
-    flowchart_agent: FlowchartAgent
+    models: ModelConfigurationReader
 
     def do_GET(self) -> None:
-        """Expose a health endpoint for shell scripts and the macOS app."""
+        """Expose service capabilities and allowlisted model metadata, never credentials."""
 
         if self.path == "/health":
-            self._send_json({"ok": True, "model": self.settings.model})
+            self._send_json({"ok": True, "capabilities": ["model-switching"]})
+            return
+        if self.path in ("/models/codex", "/models/qwen"):
+            try:
+                configuration = self.models.read(self.path.rsplit("/", 1)[-1])
+                self._send_json(configuration.metadata())
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
@@ -47,35 +53,43 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json_body()
             text = self._read_text(payload)
+            # Older HTTP clients omit provider; their historical Qwen choice remains explicit here.
+            agent = self._agent_for_provider(payload.get("provider", "qwen"))
             if self.path == "/polish":
                 result = {
-                    "polished_text": self.agent.polish(
+                    "polished_text": agent.polish(
                         text, payload.get("role"), payload.get("scenario"), payload.get("tone")
                     )
                 }
             else:
                 target_language = payload.get("target_language")
-                result = {"translation": self.agent.translate(text, target_language)}
+                result = {"translation": agent.translate(text, target_language)}
         except (ValueError, TranslationError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
-        except Exception as exc:  # noqa: BLE001 - the UI needs a readable error payload.
+        except Exception:  # Provider exceptions can contain endpoint credentials or request data.
             operation = "润色" if self.path == "/polish" else "翻译"
-            self._send_json({"error": f"{operation}请求失败：{exc}"}, HTTPStatus.BAD_GATEWAY)
+            self._send_json({"error": f"{operation}请求失败，请检查所选模型的连接和认证配置。"},
+                            HTTPStatus.BAD_GATEWAY)
             return
 
         self._send_json(result)
+
+    def _agent_for_provider(self, provider: object) -> TranslatorAgent:
+        """Bind all calls, including IPA correction, to the same freshly loaded model."""
+        return TranslatorAgent(self.models.client(provider, self.settings.request_timeout_seconds))
 
     def _generate_flowchart(self) -> None:
         """Keep one-shot diagram generation independent of translation's response policy."""
         try:
             payload = self._read_json_body()
-            result = self.flowchart_agent.generate(payload.get("text"), payload.get("model"))
+            client = self.models.client(payload.get("provider", "qwen"), self.settings.request_timeout_seconds)
+            result = FlowchartAgent(client, self.settings.max_input_chars).generate(payload.get("text"))
         except (ValueError, FlowchartError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         except Exception:  # Provider errors may include request details; do not expose credentials.
-            self._send_json({"error": "流程解析请求失败，请检查模型名称、服务连接和密钥。"},
+            self._send_json({"error": "流程解析请求失败，请检查所选模型的连接和认证配置。"},
                             HTTPStatus.BAD_GATEWAY)
             return
         self._send_json(result)
@@ -130,11 +144,10 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
 
 
 def build_server(settings: Settings) -> ThreadingHTTPServer:
-    """Create a local HTTP server with one shared LangChain agent instance."""
+    """Keep service startup independent of either provider's current credentials."""
 
     TranslatorRequestHandler.settings = settings
-    TranslatorRequestHandler.agent = TranslatorAgent(settings)
-    TranslatorRequestHandler.flowchart_agent = FlowchartAgent(settings)
+    TranslatorRequestHandler.models = ModelConfigurationReader()
     return ThreadingHTTPServer((settings.host, settings.port), TranslatorRequestHandler)
 
 
@@ -150,7 +163,7 @@ def main() -> int:
 
     print(
         "[translator-backend] listening on "
-        f"http://{settings.host}:{settings.port} with model={settings.model}",
+        f"http://{settings.host}:{settings.port}",
         file=sys.stderr,
     )
     try:

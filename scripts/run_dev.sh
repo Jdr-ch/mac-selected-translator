@@ -25,7 +25,7 @@ if ! curl -fsS "${BACKEND_URL}/health" >/dev/null 2>&1; then
 
     if ! kill -0 "${BACKEND_PID}" >/dev/null 2>&1; then
       wait "${BACKEND_PID}" || true
-      echo "本地翻译服务启动失败，请检查钥匙串或 .env 中的 DASHSCOPE_API_KEY 和端口配置。" >&2
+      echo "本地翻译服务启动失败，请检查 Python 依赖和端口配置。" >&2
       exit 1
     fi
 
