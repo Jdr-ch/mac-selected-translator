@@ -14,7 +14,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from backend.translator_agent.agent import TranslatorAgent
-from backend.translator_agent.config import Settings
+from backend.translator_agent.config import ConfigError, Settings
 from backend.translator_agent.flowchart import FlowchartAgent
 from backend.translator_agent.model_config import ModelConfigurationError, ModelConfigurationReader
 from backend.translator_agent.server import TranslatorRequestHandler
@@ -22,6 +22,16 @@ from backend.translator_agent.server import TranslatorRequestHandler
 
 class ModelConfigurationTests(unittest.TestCase):
     """Protect source ownership, fresh reads and the two providers' different wire protocols."""
+
+    def test_runtime_timeout_ignores_legacy_short_limit_and_accepts_shared_budget(self) -> None:
+        with patch.dict("os.environ", {"QWEN_REQUEST_TIMEOUT_SECONDS": "30"}, clear=True):
+            self.assertEqual(Settings.from_env().request_timeout_seconds, 120)
+        with patch.dict("os.environ", {"TRANSLATOR_REQUEST_TIMEOUT_SECONDS": "180"}, clear=True):
+            self.assertEqual(Settings.from_env().request_timeout_seconds, 180)
+        for value in ("0", "-1", "nan", "inf"):
+            with patch.dict("os.environ", {"TRANSLATOR_REQUEST_TIMEOUT_SECONDS": value}, clear=True):
+                with self.assertRaises(ConfigError):
+                    Settings.from_env()
 
     def setUp(self) -> None:
         self.directory = TemporaryDirectory()

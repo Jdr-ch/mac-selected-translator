@@ -13,6 +13,7 @@ import re
 import jieba
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from openai import APITimeoutError
 
 from .polishing import polish_messages
 
@@ -173,6 +174,8 @@ class TranslatorAgent:
         """Keep SDK failures out of validation responses, which are otherwise shown verbatim."""
         try:
             return self._llm.invoke(messages)
+        except APITimeoutError:
+            raise
         except Exception:
             raise RuntimeError("Model request failed") from None
 

@@ -64,9 +64,12 @@ struct ModelSelectionTests {
         let urlSession = URLSession(configuration: configuration)
         defer { urlSession.invalidateAndCancel(); ModelTestURLProtocol.respond = nil }
         var requests: [URLRequest] = []
+        var modelTimeout = 120
         ModelTestURLProtocol.respond = { request in
             requests.append(request)
             switch request.url!.path {
+            case "/health":
+                return Data("{\"capabilities\":[\"model-switching\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
             case "/models/codex": return Data(#"{"provider":"codex","model":"configured-model","source":"~/.codex/config.toml"}"#.utf8)
             case "/translate": return Data(#"{"translation":"译文"}"#.utf8)
             case "/flowchart":
@@ -79,20 +82,29 @@ struct ModelSelectionTests {
         let client = BackendClient(urlSession: urlSession)
         #expect(try await client.modelInformation(for: .codex).model == "configured-model")
         #expect(try await client.translate("原文", targetLanguage: "auto", provider: .codex) == "译文")
+        modelTimeout = 180
         #expect(try await client.polish(.init(text: "原文", preferences: .init()), provider: .qwen) == "润色结果")
         let flowchart = FlowchartClient(configuration: AppConfiguration(), urlSession: urlSession)
         for provider in ModelProvider.allCases {
             #expect(try await flowchart.generate(text: "流程描述", provider: provider).diagram.steps.count == 7)
             let request = try #require(requests.last)
+            #expect(request.timeoutInterval == 185)
             let body = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: request)) as? [String: String])
             #expect(body == ["text": "流程描述", "provider": provider.rawValue])
         }
-        let translation = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: requests[1])) as? [String: String])
-        let polish = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: requests[2])) as? [String: String])
+        let translationRequest = try #require(requests.first { $0.url?.path == "/translate" })
+        let polishRequest = try #require(requests.first { $0.url?.path == "/polish" })
+        #expect(translationRequest.timeoutInterval == 245)
+        #expect(polishRequest.timeoutInterval == 185)
+        let translation = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: translationRequest)) as? [String: String])
+        let polish = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: polishRequest)) as? [String: String])
         #expect(translation["provider"] == "codex")
         #expect(polish["provider"] == "qwen")
         #expect(translation["api_key"] == nil && polish["api_key"] == nil)
-        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"]}"#.utf8))
+        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"],"request_timeout_seconds":120}"#.utf8))
+        #expect(throws: TranslatorAppError.self) {
+            try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"]}"#.utf8))
+        }
         #expect(throws: TranslatorAppError.self) {
             try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"model":"qwen-old"}"#.utf8))
         }

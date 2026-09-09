@@ -35,6 +35,8 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 
 `.env` 只加载本地服务运行参数，旧的 `QWEN_MODEL`、`DASHSCOPE_BASE_URL` 和密钥配置不再作为模型来源。
 
+模型请求的默认等待时间为 120 秒，可通过运行参数 `TRANSLATOR_REQUEST_TIMEOUT_SECONDS` 调整；旧的 `QWEN_REQUEST_TIMEOUT_SECONDS` 不再读取。客户端从 `/health` 获取等待预算，翻译会预留一次音标补全请求的时间，润色和流程图按一次模型请求等待。超时会明确提示，不再误报为认证配置错误。
+
 流程图通过 `/flowchart` 的 `provider` 字段使用同一配置读取链路，不再保存或发送自定义模型名。面板保持打开时，再次展开下拉框或从菜单唤起不会重置局部选择；关闭后重开才跟随最新全局选择。
 
 ## iPhone 定位

@@ -10,7 +10,8 @@ struct FlowchartClient {
         struct Request: Encodable { let text: String; let provider: ModelProvider }
         var request = URLRequest(url: configuration.backendBaseURL.appendingPathComponent("flowchart"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 35
+        request.timeoutInterval = try await BackendRequestTimeout.load(
+            from: configuration.healthURL, modelCalls: 1, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(Request(text: text, provider: provider))
         let (data, response) = try await urlSession.data(for: request)

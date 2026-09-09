@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+import httpx
+from openai import APITimeoutError
+
 from backend.translator_agent.agent import TranslationError, TranslatorAgent
 from backend.translator_agent.polishing import TONE_INSTRUCTIONS
 from backend.translator_agent.server import TranslatorRequestHandler
@@ -65,6 +68,7 @@ class PolishingHTTPTests(unittest.TestCase):
         agent = TranslatorAgent.__new__(TranslatorAgent)
         agent._llm = Mock()
         agent._llm.invoke.return_value = SimpleNamespace(content="商品列表页开发已完成。\n接口就绪后联调。")
+        self.agent = agent
 
         class Handler(TranslatorRequestHandler):
             """Keep handler dependencies isolated from the application's running backend."""
@@ -75,7 +79,8 @@ class PolishingHTTPTests(unittest.TestCase):
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
-        Handler.settings = SimpleNamespace(max_input_chars=8000)
+        Handler.settings = SimpleNamespace(max_input_chars=8000, request_timeout_seconds=120)
+        Handler.models = SimpleNamespace(client=lambda provider, timeout: agent._llm)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -117,6 +122,15 @@ class PolishingHTTPTests(unittest.TestCase):
                 status, payload = self.post("/polish", {**base, field: value})
                 self.assertEqual(status, 400)
                 self.assertIn(expected, payload["error"])
+
+    def test_model_timeout_is_not_reported_as_an_authentication_failure(self) -> None:
+        self.agent._llm.invoke.side_effect = APITimeoutError(
+            request=httpx.Request("POST", "https://example.invalid/private-endpoint"))
+        for path in ("/translate", "/polish", "/flowchart"):
+            status, payload = self.post(path, {"text": "one two three four five six", "provider": "codex",
+                                              "role": "开发", "scenario": "办公", "tone": "polite"})
+            self.assertEqual(status, 504)
+            self.assertEqual(payload, {"error": "模型响应超时，请稍后重试。"})
 
 
 if __name__ == "__main__":

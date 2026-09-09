@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from openai import APITimeoutError
 
 # These names match the bundled diagram icons; model output never supplies SVG or URLs.
 ICON_IDS = {"file-text", "cpu", "code", "settings", "link", "play", "check"}
@@ -113,6 +114,8 @@ class FlowchartAgent:
             response = self.client.invoke([
                 SystemMessage(content=prompt), HumanMessage(content=text.strip())
             ])
+        except APITimeoutError:
+            raise
         except Exception:
             # SDK errors can embed endpoint credentials or request data.
             raise FlowchartError("流程解析请求失败，请检查所选模型的连接和认证配置。") from None

@@ -98,7 +98,9 @@ class FlowchartTests(unittest.TestCase):
                 post("/flowchart", {"text": ""})
             self.assertEqual(failure.exception.code, 400)
             with urlopen(base + "/health", timeout=3) as response:
-                self.assertIn("model-switching", json.load(response)["capabilities"])
+                health = json.load(response)
+                self.assertIn("model-switching", health["capabilities"])
+                self.assertEqual(health["request_timeout_seconds"], 2)
         finally:
             server.shutdown()
             server.server_close()

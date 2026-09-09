@@ -4,12 +4,14 @@ struct BackendClient {
     private let endpoint: URL
     private let polishEndpoint: URL
     private let modelsEndpoint: URL
+    private let healthURL: URL
     private let urlSession: URLSession
 
     init(configuration: AppConfiguration = AppConfiguration(), urlSession: URLSession = .shared) {
         self.endpoint = configuration.translateURL
         self.polishEndpoint = configuration.backendBaseURL.appendingPathComponent("polish")
         self.modelsEndpoint = configuration.backendBaseURL.appendingPathComponent("models")
+        self.healthURL = configuration.healthURL
         self.urlSession = urlSession
     }
 
@@ -20,7 +22,8 @@ struct BackendClient {
     func translate(_ text: String, targetLanguage: String, provider: ModelProvider) async throws -> String {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 35
+        // Short translations may make a second model call to complete IPA.
+        request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 2, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             TranslateRequest(text: text, targetLanguage: targetLanguage, provider: provider)
@@ -50,7 +53,7 @@ struct BackendClient {
     func polish(_ payload: PolishRequest, provider: ModelProvider) async throws -> String {
         var request = URLRequest(url: polishEndpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 65
+        request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 1, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             PolishRequest(text: payload.text, preferences: payload.preferences, provider: provider)
@@ -91,5 +94,19 @@ struct BackendClient {
             throw TranslatorAppError.backendError(message ?? "模型配置读取失败，请检查 \(provider.source)。")
         }
         return try JSONDecoder().decode(ModelInformation.self, from: data)
+    }
+}
+
+/// Translation, polishing and diagrams all derive their HTTP deadline from the same runtime setting.
+enum BackendRequestTimeout {
+    static func load(from healthURL: URL, modelCalls: Int, session: URLSession) async throws -> TimeInterval {
+        var request = URLRequest(url: healthURL)
+        request.timeoutInterval = 5
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            throw TranslatorAppError.invalidBackendResponse
+        }
+        return try JSONDecoder().decode(BackendHealth.self, from: data).requestTimeout(modelCalls: modelCalls)
     }
 }

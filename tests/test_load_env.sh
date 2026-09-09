@@ -24,6 +24,8 @@ printf '%s\n' \
   'DASHSCOPE_API_KEY=env-file-key' \
   'DASHSCOPE_BASE_URL=https://env.example/v1' \
   'TRANSLATOR_BACKEND_PORT=8766' \
+  'TRANSLATOR_REQUEST_TIMEOUT_SECONDS=120' \
+  'QWEN_REQUEST_TIMEOUT_SECONDS=30' \
   > "${env_file}"
 
 (
@@ -36,7 +38,7 @@ printf '%s\n' \
 )
 
 (
-  unset DASHSCOPE_API_KEY QWEN_API_KEY DASHSCOPE_BASE_URL TRANSLATOR_BACKEND_PORT
+  unset DASHSCOPE_API_KEY QWEN_API_KEY DASHSCOPE_BASE_URL TRANSLATOR_BACKEND_PORT TRANSLATOR_REQUEST_TIMEOUT_SECONDS QWEN_REQUEST_TIMEOUT_SECONDS
   security() { echo "legacy Keychain must not be accessed" >&2; exit 1; }
 
   load_translator_configuration "${env_file}"
@@ -44,6 +46,8 @@ printf '%s\n' \
   assert_equal "" "${DASHSCOPE_API_KEY:-}" "legacy keys must not enter model resolution"
   assert_equal "" "${DASHSCOPE_BASE_URL:-}" "legacy endpoints must not enter model resolution"
   assert_equal "8766" "${TRANSLATOR_BACKEND_PORT}" ".env must still supply runtime settings"
+  assert_equal "120" "${TRANSLATOR_REQUEST_TIMEOUT_SECONDS}" "shared runtime timeout must be loaded"
+  assert_equal "" "${QWEN_REQUEST_TIMEOUT_SECONDS:-}" "legacy timeout must not truncate reasoning requests"
 )
 
 (

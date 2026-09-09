@@ -8,6 +8,8 @@ import json
 import sys
 from typing import Any
 
+from openai import APITimeoutError
+
 from .agent import TranslationError, TranslatorAgent
 from .config import ConfigError, Settings
 from .model_config import ModelConfigurationReader
@@ -28,7 +30,8 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         """Expose service capabilities and allowlisted model metadata, never credentials."""
 
         if self.path == "/health":
-            self._send_json({"ok": True, "capabilities": ["model-switching"]})
+            self._send_json({"ok": True, "capabilities": ["model-switching"],
+                             "request_timeout_seconds": self.settings.request_timeout_seconds})
             return
         if self.path in ("/models/codex", "/models/qwen"):
             try:
@@ -64,6 +67,9 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             else:
                 target_language = payload.get("target_language")
                 result = {"translation": agent.translate(text, target_language)}
+        except APITimeoutError:
+            self._send_json({"error": "模型响应超时，请稍后重试。"}, HTTPStatus.GATEWAY_TIMEOUT)
+            return
         except (ValueError, TranslationError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
@@ -85,6 +91,9 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             client = self.models.client(payload.get("provider", "qwen"), self.settings.request_timeout_seconds)
             result = FlowchartAgent(client, self.settings.max_input_chars).generate(payload.get("text"))
+        except APITimeoutError:
+            self._send_json({"error": "模型响应超时，请稍后重试。"}, HTTPStatus.GATEWAY_TIMEOUT)
+            return
         except (ValueError, FlowchartError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return

@@ -48,3 +48,21 @@ struct TranslateResponse: Decodable {
 struct ErrorResponse: Decodable {
     let error: String?
 }
+
+/// Runtime timing is read from the service so CLI reasoning cannot outlive a shorter UI deadline.
+struct BackendHealth: Decodable {
+    let capabilities: [String]?
+    let requestTimeoutSeconds: TimeInterval?
+
+    enum CodingKeys: String, CodingKey {
+        case capabilities
+        case requestTimeoutSeconds = "request_timeout_seconds"
+    }
+
+    func requestTimeout(modelCalls: Int) throws -> TimeInterval {
+        guard let seconds = requestTimeoutSeconds, seconds.isFinite, seconds > 0 else {
+            throw TranslatorAppError.backendError("当前本地服务需要更新，请退出 App 后重新启动。")
+        }
+        return seconds * Double(modelCalls) + 5
+    }
+}

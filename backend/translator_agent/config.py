@@ -8,6 +8,7 @@ keeps service runtime settings separate from the CLI-owned model configuration.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 
 
@@ -37,17 +38,19 @@ class Settings:
         """Start even with a broken model configuration so its panel can show the error."""
 
         port_raw = os.getenv("TRANSLATOR_BACKEND_PORT", "8765")
-        timeout_raw = os.getenv("QWEN_REQUEST_TIMEOUT_SECONDS", "30")
+        timeout_raw = os.getenv("TRANSLATOR_REQUEST_TIMEOUT_SECONDS", "120")
         max_input_raw = os.getenv("TRANSLATOR_MAX_INPUT_CHARS", "8000")
 
         try:
             port = int(port_raw)
             request_timeout_seconds = float(timeout_raw)
+            if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
+                raise ValueError("Invalid timeout")
             max_input_chars = int(max_input_raw)
         except ValueError as exc:
             raise ConfigError(
-                "TRANSLATOR_BACKEND_PORT、QWEN_REQUEST_TIMEOUT_SECONDS 和 "
-                "TRANSLATOR_MAX_INPUT_CHARS 必须是数字。"
+                "TRANSLATOR_BACKEND_PORT 和 TRANSLATOR_MAX_INPUT_CHARS 必须是数字，"
+                "TRANSLATOR_REQUEST_TIMEOUT_SECONDS 必须是有限正数。"
             ) from exc
 
         return cls(

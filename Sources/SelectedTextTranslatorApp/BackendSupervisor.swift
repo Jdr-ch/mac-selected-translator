@@ -73,11 +73,11 @@ final class BackendSupervisor {
 
     /// Do not send a Codex request to an older running service that silently ignores provider.
     static func validateCapabilities(_ data: Data) throws {
-        struct Health: Decodable { let capabilities: [String]? }
-        let health = try? JSONDecoder().decode(Health.self, from: data)
+        let health = try? JSONDecoder().decode(BackendHealth.self, from: data)
         guard health?.capabilities?.contains("model-switching") == true else {
             throw TranslatorAppError.backendError("当前本地服务不支持模型切换，请退出旧版 App 及其服务后重新启动。")
         }
+        _ = try health?.requestTimeout(modelCalls: 1)
     }
 
     private func startBackendProcessIfNeeded() throws {
