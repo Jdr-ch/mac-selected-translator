@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -58,12 +59,21 @@ class ModelConfigurationReader:
             # JSON/TOML exceptions can contain source lines, including an embedded API key.
             raise ModelConfigurationError(f"配置读取失败，请检查 {source}。") from None
 
-    def client(self, provider: object, timeout: float) -> ChatOpenAI:
-        """Keep model, endpoint, credential and generation parameters in the same snapshot."""
+    def client(self, provider: object, timeout: float, reasoning: object = "fastest") -> ChatOpenAI:
+        """Overlay App reasoning on a copy; source settings and other generation options stay intact."""
         configuration = self.read(provider, include_credentials=True)
+        options = deepcopy(configuration.options)
+        allowed = ("fastest", "medium", "high", "xhigh") if provider == "codex" else ("fastest", "thinking")
+        if reasoning not in allowed:
+            raise ModelConfigurationError("推理强度不适用于所选模型，请在模型切换面板重新选择。")
+        if provider == "codex":
+            # The current Codex provider supports low as its fastest effort, not none/minimal.
+            options["reasoning_effort"] = "low" if reasoning == "fastest" else reasoning
+        else:
+            options["extra_body"]["enable_thinking"] = reasoning == "thinking"
         try:
             return ChatOpenAI(model=configuration.model, timeout=timeout, max_retries=0,
-                              **configuration.options)
+                              **options)
         except Exception:
             # SDK validation errors can print the rejected configuration, including credentials.
             raise ModelConfigurationError(f"模型配置不可用，请检查 {configuration.source}。") from None

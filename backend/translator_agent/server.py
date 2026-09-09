@@ -6,6 +6,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import sys
+from time import perf_counter
 from typing import Any
 
 from openai import APITimeoutError
@@ -30,7 +31,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         """Expose service capabilities and allowlisted model metadata, never credentials."""
 
         if self.path == "/health":
-            self._send_json({"ok": True, "capabilities": ["model-switching"],
+            self._send_json({"ok": True, "capabilities": ["model-switching", "reasoning-selection", "generation-metrics"],
                              "request_timeout_seconds": self.settings.request_timeout_seconds})
             return
         if self.path in ("/models/codex", "/models/qwen"):
@@ -57,7 +58,9 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             text = self._read_text(payload)
             # Older HTTP clients omit provider; their historical Qwen choice remains explicit here.
-            agent = self._agent_for_provider(payload.get("provider", "qwen"))
+            agent = self._agent_for_provider(payload.get("provider", "qwen"), payload.get("reasoning", "fastest"))
+            # Measure generation after client setup, including every IPA correction call.
+            started = perf_counter()
             if self.path == "/polish":
                 result = {
                     "polished_text": agent.polish(
@@ -67,6 +70,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             else:
                 target_language = payload.get("target_language")
                 result = {"translation": agent.translate(text, target_language)}
+            result["ai_ms"] = round((perf_counter() - started) * 1000, 2)
         except APITimeoutError:
             self._send_json({"error": "模型响应超时，请稍后重试。"}, HTTPStatus.GATEWAY_TIMEOUT)
             return
@@ -81,15 +85,16 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(result)
 
-    def _agent_for_provider(self, provider: object) -> TranslatorAgent:
+    def _agent_for_provider(self, provider: object, reasoning: object) -> TranslatorAgent:
         """Bind all calls, including IPA correction, to the same freshly loaded model."""
-        return TranslatorAgent(self.models.client(provider, self.settings.request_timeout_seconds))
+        return TranslatorAgent(self.models.client(provider, self.settings.request_timeout_seconds, reasoning))
 
     def _generate_flowchart(self) -> None:
         """Keep one-shot diagram generation independent of translation's response policy."""
         try:
             payload = self._read_json_body()
-            client = self.models.client(payload.get("provider", "qwen"), self.settings.request_timeout_seconds)
+            client = self.models.client(payload.get("provider", "qwen"), self.settings.request_timeout_seconds,
+                                        payload.get("reasoning", "fastest"))
             result = FlowchartAgent(client, self.settings.max_input_chars).generate(payload.get("text"))
         except APITimeoutError:
             self._send_json({"error": "模型响应超时，请稍后重试。"}, HTTPStatus.GATEWAY_TIMEOUT)

@@ -6,6 +6,11 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct ContentPolishTests {
+    /// Every stub carries deterministic request metadata, independent of the real global defaults.
+    private static func output(_ text: String) -> ModelTextResult {
+        ModelTextResult(text: text, completion: ModelCompletion(provider: .codex, reasoning: .medium, aiMS: 10500))
+    }
+
     @Test
     func rewritesOriginalWithUpdatedContextAndRemembersSuccessfulPreferences() async throws {
         let suite = "ContentPolishTests.\(UUID().uuidString)"
@@ -14,7 +19,7 @@ struct ContentPolishTests {
         var requests: [PolishRequest] = []
         let session = ContentPolishSession(defaults: defaults) { request in
             requests.append(request)
-            return "润色后的完整内容\n第二段"
+            return Self.output("润色后的完整内容\n第二段")
         }
         #expect(session.preferences == PolishPreferences())
         session.open(sourceText: " 原始内容\n第二段 ")
@@ -22,6 +27,7 @@ struct ContentPolishTests {
         session.update(sourceText: session.sourceText, preferences: .init(role: "产品经理", scenario: "周报", tone: .concise))
         #expect(session.isDirty)
         #expect(session.result?.request.tone == .professional)
+        #expect(session.result?.completion.status("已润色") == "已润色·codex-中 10.5秒")
         await session.polish()?.value
         #expect(requests.count == 2)
         #expect(requests.allSatisfy { $0.text == "原始内容\n第二段" })
@@ -38,14 +44,14 @@ struct ContentPolishTests {
         let suite = "ContentPolishTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        var continuation: CheckedContinuation<String, Error>?
+        var continuation: CheckedContinuation<ModelTextResult, Error>?
         var calls = 0
         let session = ContentPolishSession(defaults: defaults) { _ in
             calls += 1
             if calls == 1 {
                 return try await withCheckedThrowingContinuation { continuation = $0 }
             }
-            return "当前结果"
+            return Self.output("当前结果")
         }
         session.open(sourceText: "原文")
         let firstTask = try #require(session.polish())
@@ -55,11 +61,13 @@ struct ContentPolishTests {
         session.cancel()
         session.update(sourceText: "新的原文", preferences: .init(tone: .formal))
         await session.polish()?.value
-        pending.resume(returning: "过期结果")
+        pending.resume(returning: ModelTextResult(text: "过期结果",
+                                                completion: ModelCompletion(provider: .qwen, reasoning: .thinking, aiMS: 20000)))
         await firstTask.value
         #expect(calls == 2)
         #expect(session.result?.text == "当前结果")
         #expect(session.result?.request.text == "新的原文")
+        #expect(session.result?.completion.provider == .codex)
         #expect(session.phase == .idle)
     }
 
@@ -71,7 +79,7 @@ struct ContentPolishTests {
         var shouldFail = false
         let session = ContentPolishSession(defaults: defaults) { _ in
             if shouldFail { throw TranslatorAppError.backendError("请求失败，请重试。") }
-            return "上次结果"
+            return Self.output("上次结果")
         }
         session.open(sourceText: "原文")
         await session.polish()?.value
@@ -83,6 +91,7 @@ struct ContentPolishTests {
         await session.polish()?.value
         #expect(session.phase == .error("请求失败，请重试。"))
         #expect(session.result?.text == "上次结果")
+        #expect(session.result?.completion.status("已润色") == "已润色·codex-中 10.5秒")
         #expect(PolishPreferences.load(from: defaults).tone == .professional)
     }
 
@@ -93,7 +102,7 @@ struct ContentPolishTests {
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         var output = "商品列表页开发已完成。\n请在库存接口就绪后同步，我会完成联调与自测。"
-        let session = ContentPolishSession(defaults: defaults) { _ in output }
+        let session = ContentPolishSession(defaults: defaults) { _ in Self.output(output) }
         let controller = ContentPolishWindowController(session: session)
         let window = try #require(controller.window)
         let content = try #require(window.contentView)
@@ -110,12 +119,14 @@ struct ContentPolishTests {
         await session.polish()?.value
         content.layoutSubtreeIfNeeded()
         #expect(controller.resultView.string == output)
+        #expect(controller.statusLabel.stringValue == "已润色·codex-中 10.5秒")
         #expect(!controller.resultView.isEditable)
         #expect(controller.sourceView.isEditable)
         for width in [680.0, 600.0] {
             window.setContentSize(NSSize(width: width, height: 540))
             content.layoutSubtreeIfNeeded()
-            for view in [controller.roleField, controller.scenarioField, controller.tonePicker, controller.runButton, controller.copyButton] {
+            for view in [controller.roleField, controller.scenarioField, controller.tonePicker,
+                         controller.runButton, controller.copyButton, controller.statusLabel] {
                 let frame = view.convert(view.bounds, to: content)
                 #expect(content.bounds.contains(frame))
                 #expect(frame.width > 30)
@@ -124,6 +135,7 @@ struct ContentPolishTests {
             #expect(controller.resultView.enclosingScrollView!.frame.height >= 50)
             let pickerFrame = controller.tonePicker.convert(controller.tonePicker.bounds, to: content)
             #expect(abs(pickerFrame.maxX - (content.bounds.maxX - 20)) < 1)
+            #expect(controller.statusLabel.frame.width >= controller.statusLabel.intrinsicContentSize.width)
         }
         let pasteboard = NSPasteboard.general
         let oldItems = (pasteboard.pasteboardItems ?? []).map { item in
@@ -181,7 +193,7 @@ struct ContentPolishTests {
         var requests: [PolishRequest] = []
         let session = ContentPolishSession(defaults: defaults) { request in
             requests.append(request)
-            return "本次结果"
+            return Self.output("本次结果")
         }
         let controller = ContentPolishWindowController(session: session)
         session.open(sourceText: "保持原始片段")
@@ -192,6 +204,7 @@ struct ContentPolishTests {
         controller.scenarioField.stringValue = "周报"
         controller.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
         #expect(requests.count == 1)
+        #expect(controller.statusLabel.stringValue == "已润色·codex-中 10.5秒")
         let toneAction = try #require(controller.tonePicker.action)
         controller.tonePicker.selectItem(at: try #require(PolishTone.allCases.firstIndex(of: .polite)))
         #expect(NSApp.sendAction(toneAction, to: controller.tonePicker.target, from: controller.tonePicker))
@@ -219,7 +232,7 @@ struct ContentPolishTests {
         let suite = "ContentPolishTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let session = ContentPolishSession(defaults: defaults) { _ in "润色结果" }
+        let session = ContentPolishSession(defaults: defaults) { _ in Self.output("润色结果") }
         let controller = ContentPolishWindowController(session: session)
         let panel = try #require(controller.window as? NSPanel)
         #expect(panel.level == .normal)

@@ -16,14 +16,14 @@ final class ContentPolishSession {
     var onChange: (() -> Void)?
 
     private let defaults: UserDefaults
-    private let requestPolish: (PolishRequest) async throws -> String
+    private let requestPolish: (PolishRequest) async throws -> ModelTextResult
     private var requestTask: Task<Void, Never>?
     /// Invalidated on cancel/open so a late network response cannot replace the current session.
     private var requestID = UUID()
 
     init(
         defaults: UserDefaults = .standard,
-        requestPolish: @escaping (PolishRequest) async throws -> String
+        requestPolish: @escaping (PolishRequest) async throws -> ModelTextResult
     ) {
         self.defaults = defaults
         self.preferences = PolishPreferences.load(from: defaults)
@@ -78,12 +78,12 @@ final class ContentPolishSession {
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                let text = try await requestPolish(request)
+                let response = try await requestPolish(request)
                 guard requestID == id, !Task.isCancelled else { return }
-                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                guard !response.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw TranslatorAppError.backendError("模型返回了空润色结果，请重试。")
                 }
-                result = PolishResult(request: request, text: text)
+                result = PolishResult(request: request, text: response.text, completion: response.completion)
                 preferences = request.preferences
                 preferences.save(to: defaults)
                 phase = .idle

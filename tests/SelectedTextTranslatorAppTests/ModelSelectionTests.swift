@@ -28,6 +28,28 @@ struct ModelSelectionTests {
         #expect(reads == [.codex, .codex])
     }
 
+    /// Changing one provider's App effort must survive reopening without changing the other.
+    @Test
+    func reasoningDefaultsToFastestAndPersistsIndependently() throws {
+        let name = "ModelSelectionTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = ModelSelectionStore(defaults: defaults)
+        #expect(store.reasoning(for: .codex) == .fastest)
+        #expect(store.reasoning(for: .qwen) == .fastest)
+        store.selectReasoning(.thinking)
+        store.select(.codex)
+        #expect(store.reasoning(for: .codex) == .fastest)
+        store.selectReasoning(.high)
+        let restored = ModelSelectionStore(defaults: defaults)
+        #expect(restored.reasoning(for: .codex) == .high)
+        #expect(restored.reasoning(for: .qwen) == .thinking)
+        restored.selectReasoning(.thinking)
+        #expect(restored.reasoning(for: .codex) == .high)
+        #expect(Set(defaults.persistentDomain(forName: name)?.keys.map { $0 } ?? []) ==
+                Set(["modelSelection.provider", "modelSelection.reasoning.codex", "modelSelection.reasoning.qwen"]))
+    }
+
     @Test
     func rapidTabChangesIgnoreLateResponsesAndFailureKeepsChosenProvider() async throws {
         let name = "ModelSelectionTests.\(UUID().uuidString)"
@@ -69,28 +91,33 @@ struct ModelSelectionTests {
             requests.append(request)
             switch request.url!.path {
             case "/health":
-                return Data("{\"capabilities\":[\"model-switching\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
+                return Data("{\"capabilities\":[\"model-switching\",\"reasoning-selection\",\"generation-metrics\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
             case "/models/codex": return Data(#"{"provider":"codex","model":"configured-model","source":"~/.codex/config.toml"}"#.utf8)
-            case "/translate": return Data(#"{"translation":"译文"}"#.utf8)
+            case "/translate": return Data(#"{"translation":"译文","ai_ms":10500}"#.utf8)
             case "/flowchart":
                 var response: [String: Any] = ["model": "configured-model", "ai_ms": 10]
                 response["diagram"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FlowchartDocument.example))
                 return try JSONSerialization.data(withJSONObject: response)
-            default: return Data(#"{"polished_text":"润色结果"}"#.utf8)
+            default: return Data(#"{"polished_text":"润色结果","ai_ms":2300}"#.utf8)
             }
         }
         let client = BackendClient(urlSession: urlSession)
         #expect(try await client.modelInformation(for: .codex).model == "configured-model")
-        #expect(try await client.translate("原文", targetLanguage: "auto", provider: .codex) == "译文")
+        let translated = try await client.translate("原文", targetLanguage: "auto", provider: .codex, reasoning: .high)
+        #expect(translated.text == "译文")
+        #expect(translated.completion.status("已翻译") == "已翻译·codex-高 10.5秒")
         modelTimeout = 180
-        #expect(try await client.polish(.init(text: "原文", preferences: .init()), provider: .qwen) == "润色结果")
+        let polished = try await client.polish(.init(text: "原文", preferences: .init()), provider: .qwen, reasoning: .thinking)
+        #expect(polished.text == "润色结果")
+        #expect(polished.completion.status("已润色") == "已润色·qwen-深度思考 2.3秒")
         let flowchart = FlowchartClient(configuration: AppConfiguration(), urlSession: urlSession)
         for provider in ModelProvider.allCases {
-            #expect(try await flowchart.generate(text: "流程描述", provider: provider).diagram.steps.count == 7)
+            #expect(try await flowchart.generate(text: "流程描述", provider: provider,
+                                               reasoning: .fastest).diagram.steps.count == 7)
             let request = try #require(requests.last)
             #expect(request.timeoutInterval == 185)
             let body = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: request)) as? [String: String])
-            #expect(body == ["text": "流程描述", "provider": provider.rawValue])
+            #expect(body == ["text": "流程描述", "provider": provider.rawValue, "reasoning": "fastest"])
         }
         let translationRequest = try #require(requests.first { $0.url?.path == "/translate" })
         let polishRequest = try #require(requests.first { $0.url?.path == "/polish" })
@@ -100,8 +127,16 @@ struct ModelSelectionTests {
         let polish = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: polishRequest)) as? [String: String])
         #expect(translation["provider"] == "codex")
         #expect(polish["provider"] == "qwen")
+        #expect(translation["reasoning"] == "high")
+        #expect(polish["reasoning"] == "thinking")
         #expect(translation["api_key"] == nil && polish["api_key"] == nil)
-        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"],"request_timeout_seconds":120}"#.utf8))
+        try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection","generation-metrics"],"request_timeout_seconds":120}"#.utf8))
+        #expect(throws: TranslatorAppError.self) {
+            try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching","reasoning-selection"],"request_timeout_seconds":120}"#.utf8))
+        }
+        #expect(throws: TranslatorAppError.self) {
+            try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"],"request_timeout_seconds":120}"#.utf8))
+        }
         #expect(throws: TranslatorAppError.self) {
             try BackendSupervisor.validateCapabilities(Data(#"{"ok":true,"capabilities":["model-switching"]}"#.utf8))
         }
@@ -111,7 +146,7 @@ struct ModelSelectionTests {
     }
 
     @Test
-    func nativePanelHasTwoReadOnlyTabsAndStableLayout() async throws {
+    func nativePanelHasReadOnlyMetadataAndWorkingReasoningControl() async throws {
         _ = NSApplication.shared
         let name = "ModelSelectionTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
@@ -132,8 +167,17 @@ struct ModelSelectionTests {
             #expect(store.provider == provider)
             #expect(controller.sourceLabel.stringValue == provider.source)
             #expect(controller.modelLabel.stringValue == (provider == .codex ? "gpt-6-astra" : "qwen3.7-max"))
+            #expect(controller.reasoningControl.itemTitles == provider.reasoningOptions.map { $0.title(for: provider) })
+            #expect(controller.reasoningControl.indexOfSelectedItem == 0)
+            controller.reasoningControl.selectItem(at: 1)
+            #expect(controller.reasoningControl.sendAction(controller.reasoningControl.action,
+                                                           to: controller.reasoningControl.target))
+            #expect(store.reasoning(for: provider) == provider.reasoningOptions[1])
+            await session.refresh().value
+            #expect(controller.reasoningControl.indexOfSelectedItem == 1)
             content.layoutSubtreeIfNeeded()
-            for view in (controller.tabs as [NSView]) + [controller.modelLabel, controller.sourceLabel, controller.defaultLabel] {
+            for view in (controller.tabs as [NSView]) + [controller.modelLabel, controller.sourceLabel,
+                                                       controller.defaultLabel, controller.reasoningControl] {
                 let frame = view.convert(view.bounds, to: content)
                 #expect(content.bounds.contains(frame))
                 #expect(frame.height > 10)
@@ -141,6 +185,11 @@ struct ModelSelectionTests {
             let modelFrame = controller.modelLabel.convert(controller.modelLabel.bounds, to: content)
             let defaultFrame = controller.defaultLabel.convert(controller.defaultLabel.bounds, to: content)
             #expect(modelFrame.maxX < defaultFrame.minX)
+            let reasoningFrame = controller.reasoningControl.convert(controller.reasoningControl.bounds, to: content)
+            let sourceFrame = controller.sourceLabel.convert(controller.sourceLabel.bounds, to: content)
+            #expect(!reasoningFrame.intersects(modelFrame) && !reasoningFrame.intersects(sourceFrame))
+            controller.reasoningControl.selectItem(at: 0)
+            controller.reasoningControl.sendAction(controller.reasoningControl.action, to: controller.reasoningControl.target)
             // Optional bitmaps are test artifacts; no installed app, login item or real config is changed.
             if let path = ProcessInfo.processInfo.environment["MODEL_PANEL_PREVIEW_DIR"] {
                 let directory = URL(fileURLWithPath: path, isDirectory: true)

@@ -5,15 +5,19 @@ struct FlowchartClient {
     let configuration: AppConfiguration
     var urlSession: URLSession = .shared
 
-    /// Sends only the local provider choice; the service resolves its CLI-owned configuration.
-    func generate(text: String, provider: ModelProvider) async throws -> FlowchartResponse {
-        struct Request: Encodable { let text: String; let provider: ModelProvider }
+    /// Uses the editor's provider and its App reasoning preference, with CLI-owned authentication.
+    func generate(text: String, provider: ModelProvider, reasoning: ModelReasoning) async throws -> FlowchartResponse {
+        struct Request: Encodable {
+            let text: String
+            let provider: ModelProvider
+            let reasoning: ModelReasoning
+        }
         var request = URLRequest(url: configuration.backendBaseURL.appendingPathComponent("flowchart"))
         request.httpMethod = "POST"
         request.timeoutInterval = try await BackendRequestTimeout.load(
             from: configuration.healthURL, modelCalls: 1, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(Request(text: text, provider: provider))
+        request.httpBody = try JSONEncoder().encode(Request(text: text, provider: provider, reasoning: reasoning))
         let (data, response) = try await urlSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw FlowchartError.message("流程图服务返回了无法识别的响应。")

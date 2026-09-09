@@ -24,7 +24,7 @@ final class FloatingPanelController: NSObject {
 
     private enum PopupState {
         case loading(message: String)
-        case result(TranslationResultPresentation)
+        case result(TranslationResultPresentation, ModelCompletion?)
         case error(message: String)
     }
 
@@ -36,15 +36,18 @@ final class FloatingPanelController: NSObject {
     private let headerSeparator = NSBox()
     private let scrollView = NSScrollView()
     private let bodyView = FlippedView()
-    private let history = TranslationHistory()
+    private let history: TranslationHistory
     private let historyView = TranslationHistoryView(frame: .zero)
+    /// Fixed above history so generation metadata remains visible when long translations scroll.
+    let completionLabel = NSTextField(labelWithString: "")
     /// Identifies the displayed successful selection; loading and diagnostic messages have no selected entry.
     private var selectedSourceText: String?
     private var progressIndicator: NSProgressIndicator?
     private var autoHideTimer: Timer?
     private var outsideClickMonitor: Any?
 
-    override init() {
+    init(defaults: UserDefaults = .standard) {
+        history = TranslationHistory(defaults: defaults)
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: 160),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -100,6 +103,11 @@ final class FloatingPanelController: NSObject {
         containerView.addSubview(headerSeparator)
         containerView.addSubview(scrollView)
         containerView.addSubview(historyView)
+        completionLabel.font = .systemFont(ofSize: 12)
+        completionLabel.textColor = .secondaryLabelColor
+        completionLabel.lineBreakMode = .byTruncatingTail
+        completionLabel.isHidden = true
+        containerView.addSubview(completionLabel)
         historyView.onSelect = { [weak self] entry in
             self?.showHistoryEntry(entry)
         }
@@ -114,14 +122,14 @@ final class FloatingPanelController: NSObject {
     }
 
     /// Records successful selections only; diagnostic callers omit sourceText and never enter history.
-    func showResult(_ translation: String, sourceText: String? = nil) {
+    func showResult(_ translation: String, sourceText: String? = nil, completion: ModelCompletion? = nil) {
         selectedSourceText = sourceText?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let sourceText {
-            history.record(sourceText: sourceText, translation: translation)
+            history.record(sourceText: sourceText, translation: translation, completion: completion)
         }
         show(
             title: "翻译结果",
-            state: .result(TranslationResultPresentation(response: translation)),
+            state: .result(TranslationResultPresentation(response: translation), completion),
             autoHideAfter: nil
         )
     }
@@ -147,24 +155,33 @@ final class FloatingPanelController: NSObject {
 
         let bodyHeight: CGFloat
         let canRecallHistory: Bool
+        let completion: ModelCompletion?
         switch state {
         case let .loading(message):
             bodyHeight = renderLoading(message)
             canRecallHistory = false
-        case let .result(presentation):
+            completion = nil
+        case let .result(presentation, metadata):
             bodyHeight = renderResult(presentation)
             canRecallHistory = true
+            completion = metadata
         case let .error(message):
             bodyHeight = renderError(message)
             canRecallHistory = true
+            completion = nil
         }
+
+        completionLabel.stringValue = completion?.status("已翻译") ?? ""
+        completionLabel.toolTip = completionLabel.stringValue
+        completionLabel.isHidden = completion == nil
+        let completionHeight: CGFloat = completion == nil ? 0 : 28
 
         // Disable recall during loading so an in-flight result cannot overwrite a history selection.
         historyView.update(entries: history.entries, selectedSourceText: selectedSourceText, isEnabled: canRecallHistory)
         let historyHeight = history.entries.isEmpty ? 0 : TranslationHistoryView.preferredHeight
-        let height = min(max(Metrics.headerHeight + bodyHeight + historyHeight, 100), Metrics.maximumPanelHeight)
+        let height = min(max(Metrics.headerHeight + bodyHeight + historyHeight + completionHeight, 100), Metrics.maximumPanelHeight)
         let previousFrame = panel.frame
-        layoutPanel(height: height, bodyHeight: bodyHeight, historyHeight: historyHeight)
+        layoutPanel(height: height, bodyHeight: bodyHeight, historyHeight: historyHeight, completionHeight: completionHeight)
         if followsMouse {
             positionNearMouse(width: Metrics.panelWidth, height: height)
         } else {
@@ -352,7 +369,7 @@ final class FloatingPanelController: NSObject {
         selectedSourceText = entry.sourceText
         show(
             title: "翻译结果",
-            state: .result(TranslationResultPresentation(response: entry.translation)),
+            state: .result(TranslationResultPresentation(response: entry.translation), entry.completion),
             autoHideAfter: nil,
             followsMouse: false
         )
@@ -409,8 +426,8 @@ final class FloatingPanelController: NSObject {
     }
 
     /// Keeps the compact header and history fixed while long results scroll within the 360-point limit.
-    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat, historyHeight: CGFloat) {
-        let bodyViewportHeight = height - Metrics.headerHeight - historyHeight
+    private func layoutPanel(height: CGFloat, bodyHeight: CGFloat, historyHeight: CGFloat, completionHeight: CGFloat) {
+        let bodyViewportHeight = height - Metrics.headerHeight - historyHeight - completionHeight
         let headerBottom = height - Metrics.headerHeight
         let documentHeight = max(bodyHeight, bodyViewportHeight)
 
@@ -420,7 +437,8 @@ final class FloatingPanelController: NSObject {
         titleLabel.frame = NSRect(x: 43, y: headerBottom + 9, width: 325, height: 20)
         closeButton.frame = NSRect(x: 378, y: headerBottom + 5, width: 28, height: 28)
         headerSeparator.frame = NSRect(x: 0, y: headerBottom, width: Metrics.panelWidth, height: 1)
-        scrollView.frame = NSRect(x: 0, y: historyHeight, width: Metrics.panelWidth, height: bodyViewportHeight)
+        scrollView.frame = NSRect(x: 0, y: historyHeight + completionHeight, width: Metrics.panelWidth, height: bodyViewportHeight)
+        completionLabel.frame = NSRect(x: Metrics.contentPadding, y: historyHeight + 6, width: Metrics.contentWidth, height: 18)
         historyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: historyHeight)
         bodyView.frame = NSRect(x: 0, y: 0, width: Metrics.panelWidth, height: documentHeight)
         scrollView.contentView.scroll(to: .zero)

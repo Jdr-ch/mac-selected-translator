@@ -69,11 +69,11 @@ class FlowchartTests(unittest.TestCase):
 
     def test_http_flowchart_and_translation_contracts_coexist(self):
         class Handler(TranslatorRequestHandler):
-            def _agent_for_provider(self, provider):
+            def _agent_for_provider(self, provider, reasoning):
                 return SimpleNamespace(translate=lambda text, language: "主译：" + text)
 
         Handler.settings = self.settings
-        factory = Mock(side_effect=lambda provider, timeout: Mock(
+        factory = Mock(side_effect=lambda provider, timeout, reasoning: Mock(
             model_name=provider + "-configured", invoke=Mock(return_value=SimpleNamespace(content=json.dumps(document())))))
         Handler.models = SimpleNamespace(client=factory)
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -89,17 +89,21 @@ class FlowchartTests(unittest.TestCase):
 
         try:
             for provider in ("codex", "qwen"):
-                result = post("/flowchart", {"text": "-".join(NAMES), "provider": provider})
+                result = post("/flowchart", {"text": "-".join(NAMES), "provider": provider, "reasoning": "fastest"})
                 self.assertEqual(result["model"], provider + "-configured")
                 self.assertEqual(len(result["diagram"]["steps"]), 7)
-            self.assertEqual(factory.call_args_list, [call("codex", 2), call("qwen", 2)])
-            self.assertEqual(post("/translate", {"text": "hello"}), {"translation": "主译：hello"})
+            self.assertEqual(factory.call_args_list, [call("codex", 2, "fastest"), call("qwen", 2, "fastest")])
+            translation = post("/translate", {"text": "hello"})
+            self.assertEqual(translation["translation"], "主译：hello")
+            self.assertGreaterEqual(translation["ai_ms"], 0)
             with self.assertRaises(HTTPError) as failure:
                 post("/flowchart", {"text": ""})
             self.assertEqual(failure.exception.code, 400)
             with urlopen(base + "/health", timeout=3) as response:
                 health = json.load(response)
                 self.assertIn("model-switching", health["capabilities"])
+                self.assertIn("reasoning-selection", health["capabilities"])
+                self.assertIn("generation-metrics", health["capabilities"])
                 self.assertEqual(health["request_timeout_seconds"], 2)
         finally:
             server.shutdown()

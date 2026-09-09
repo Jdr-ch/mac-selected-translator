@@ -14,7 +14,7 @@ final class ContentPolishWindowController: NSWindowController, NSWindowDelegate,
     private let cancelButton = NSButton(title: "取消", target: nil, action: nil)
     private let closeButton = NSButton(title: "", target: nil, action: nil)
     private let countLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(labelWithString: "")
+    let statusLabel = NSTextField(labelWithString: "")
     private let contextLabel = NSTextField(labelWithString: "")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let feedbackLabel = NSTextField(labelWithString: "")
@@ -132,6 +132,8 @@ final class ContentPolishWindowController: NSWindowController, NSWindowDelegate,
         contextLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         feedbackLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
 
     /// Native SF Symbols keep icon actions consistent with the rest of the AppKit application.
@@ -212,6 +214,7 @@ final class ContentPolishWindowController: NSWindowController, NSWindowDelegate,
             resultRule.leadingAnchor.constraint(equalTo: fields.leadingAnchor), resultRule.trailingAnchor.constraint(equalTo: fields.trailingAnchor),
             resultTitle.topAnchor.constraint(equalTo: resultRule.bottomAnchor, constant: 14), resultTitle.leadingAnchor.constraint(equalTo: fields.leadingAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: resultTitle.centerYAnchor), statusLabel.trailingAnchor.constraint(equalTo: fields.trailingAnchor),
+            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: resultTitle.trailingAnchor, constant: 12),
             contextLabel.topAnchor.constraint(equalTo: resultTitle.bottomAnchor, constant: 8),
             contextLabel.leadingAnchor.constraint(equalTo: fields.leadingAnchor), contextLabel.trailingAnchor.constraint(equalTo: fields.trailingAnchor),
             contextLabel.heightAnchor.constraint(equalToConstant: 18),
@@ -319,11 +322,12 @@ final class ContentPolishWindowController: NSWindowController, NSWindowDelegate,
             if session.currentRequest.role.isEmpty { roleError.stringValue = "请填写角色"; roleError.isHidden = false }
             if session.currentRequest.scenario.isEmpty { scenarioError.stringValue = "请填写场景"; scenarioError.isHidden = false }
         case .idle:
-            statusLabel.stringValue = session.isDirty ? "待重新润色" : session.result == nil ? "等待润色" : "已完成"
+            statusLabel.stringValue = session.result?.completion.status("已润色") ?? "等待润色"
             statusLabel.textColor = session.isDirty ? .systemOrange : session.result == nil ? .secondaryLabelColor : .systemGreen
             runButton.title = session.result == nil ? "开始润色" : "重新润色"
         }
         errorHeight.constant = errorLabel.stringValue.isEmpty ? 0 : 42
+        statusLabel.toolTip = statusLabel.stringValue
         errorLabel.toolTip = errorLabel.stringValue
     }
 

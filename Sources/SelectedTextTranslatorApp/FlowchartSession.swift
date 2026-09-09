@@ -19,7 +19,8 @@ final class FlowchartSession {
     var onChange: (() -> Void)?
     private let defaults: UserDefaults
     private let defaultProvider: () -> ModelProvider
-    private let generateResponse: (String, ModelProvider) async throws -> FlowchartResponse
+    private let reasoningForProvider: (ModelProvider) -> ModelReasoning
+    private let generateResponse: (String, ModelProvider, ModelReasoning) async throws -> FlowchartResponse
     private var task: Task<Void, Never>?
     // Each cancel/new generation invalidates late results even when the upstream call cannot stop.
     private var generation = 0
@@ -27,9 +28,11 @@ final class FlowchartSession {
 
     init(defaults: UserDefaults = .standard,
          defaultProvider: @escaping () -> ModelProvider = { .qwen },
-         generateResponse: @escaping (String, ModelProvider) async throws -> FlowchartResponse) {
+         reasoningForProvider: @escaping (ModelProvider) -> ModelReasoning = { _ in .fastest },
+         generateResponse: @escaping (String, ModelProvider, ModelReasoning) async throws -> FlowchartResponse) {
         self.defaults = defaults
         self.defaultProvider = defaultProvider
+        self.reasoningForProvider = reasoningForProvider
         provider = defaultProvider()
         self.generateResponse = generateResponse
         if let data = defaults.data(forKey: Self.storageKey),
@@ -89,13 +92,15 @@ final class FlowchartSession {
             return
         }
         let provider = self.provider
+        // Capture before scheduling the task, including when the editor selected a different provider.
+        let reasoning = reasoningForProvider(provider)
         generation += 1
         let requestGeneration = generation
         isGenerating = true
         report("正在理解流程…", isError: false)
         task = Task { [weak self, generateResponse] in
             do {
-                let result = try await generateResponse(input, provider)
+                let result = try await generateResponse(input, provider, reasoning)
                 try Task.checkCancellation()
                 try result.diagram.validate()
                 guard let self, self.generation == requestGeneration else { return }
@@ -104,7 +109,8 @@ final class FlowchartSession {
                 self.isGenerating = false
                 self.task = nil
                 self.persist()
-                self.report("已生成 · AI \(String(format: "%.2f", result.aiMS / 1000)) 秒", isError: false)
+                let completion = ModelCompletion(provider: provider, reasoning: reasoning, aiMS: result.aiMS)
+                self.report(completion.status("已生成"), isError: false)
             } catch {
                 guard let self, self.generation == requestGeneration else { return }
                 self.isGenerating = false

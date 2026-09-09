@@ -71,11 +71,17 @@ final class BackendSupervisor {
         }
     }
 
-    /// Do not send a Codex request to an older running service that silently ignores provider.
+    /// Reject older services that would silently ignore provider or App-only reasoning overrides.
     static func validateCapabilities(_ data: Data) throws {
         let health = try? JSONDecoder().decode(BackendHealth.self, from: data)
         guard health?.capabilities?.contains("model-switching") == true else {
             throw TranslatorAppError.backendError("当前本地服务不支持模型切换，请退出旧版 App 及其服务后重新启动。")
+        }
+        guard health?.capabilities?.contains("reasoning-selection") == true else {
+            throw TranslatorAppError.backendError("当前本地服务不支持推理强度切换，请退出 App 后重新启动。")
+        }
+        guard health?.capabilities?.contains("generation-metrics") == true else {
+            throw TranslatorAppError.backendError("当前本地服务不支持生成耗时，请退出 App 后重新启动。")
         }
         _ = try health?.requestTimeout(modelCalls: 1)
     }

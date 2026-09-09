@@ -5,6 +5,8 @@ final class TranslationHistory {
     struct Entry: Codable, Equatable {
         let sourceText: String
         let translation: String
+        /// Older saved entries have no metadata; never substitute the current model when recalled.
+        let completion: ModelCompletion?
     }
 
     static let capacity = 5
@@ -21,14 +23,14 @@ final class TranslationHistory {
     }
 
     /// Updates an exact source selection and evicts the oldest translation beyond the five-entry limit.
-    func record(sourceText: String, translation: String) {
+    func record(sourceText: String, translation: String, completion: ModelCompletion? = nil) {
         let source = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty, !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return
         }
 
         entries.removeAll { $0.sourceText == source }
-        entries.insert(Entry(sourceText: source, translation: translation), at: 0)
+        entries.insert(Entry(sourceText: source, translation: translation, completion: completion), at: 0)
         entries = Array(entries.prefix(Self.capacity))
         if let data = try? JSONEncoder().encode(entries) {
             defaults.set(data, forKey: Self.userDefaultsKey)

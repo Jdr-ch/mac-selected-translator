@@ -8,7 +8,7 @@ import json
 from threading import Thread
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 from openai import APITimeoutError
@@ -73,14 +73,14 @@ class PolishingHTTPTests(unittest.TestCase):
         class Handler(TranslatorRequestHandler):
             """Keep handler dependencies isolated from the application's running backend."""
 
-            def _agent_for_provider(self, provider: object) -> TranslatorAgent:
+            def _agent_for_provider(self, provider: object, reasoning: object) -> TranslatorAgent:
                 return agent
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
         Handler.settings = SimpleNamespace(max_input_chars=8000, request_timeout_seconds=120)
-        Handler.models = SimpleNamespace(client=lambda provider, timeout: agent._llm)
+        Handler.models = SimpleNamespace(client=lambda provider, timeout, reasoning: agent._llm)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -107,10 +107,23 @@ class PolishingHTTPTests(unittest.TestCase):
             "text": "商品列表页写完了", "role": "前端开发工程师", "scenario": "办公", "tone": "polite",
         })
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"polished_text": "商品列表页开发已完成。\n接口就绪后联调。"})
+        self.assertEqual(payload["polished_text"], "商品列表页开发已完成。\n接口就绪后联调。")
+        self.assertGreaterEqual(payload["ai_ms"], 0)
         status, payload = self.post("/translate", {"text": "one two three four five six"})
         self.assertEqual(status, 200)
         self.assertIn("translation", payload)
+
+    def test_timing_comes_from_local_clock_without_additional_model_calls(self) -> None:
+        """Timing is returned alongside text; the LLM receives no separate metrics request."""
+        for path in ("/translate", "/polish"):
+            self.agent._llm.invoke.reset_mock()
+            with patch("backend.translator_agent.server.perf_counter", side_effect=[100, 110.5]) as timer:
+                status, payload = self.post(path, {"text": "one two three four five six", "provider": "codex",
+                                                  "role": "开发", "scenario": "办公", "tone": "polite"})
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["ai_ms"], 10500)
+            self.assertEqual(timer.call_count, 2)
+            self.agent._llm.invoke.assert_called_once()
 
     def test_request_validation_preserves_actionable_error(self) -> None:
         base = {"text": "原文", "role": "开发", "scenario": "办公", "tone": "professional"}

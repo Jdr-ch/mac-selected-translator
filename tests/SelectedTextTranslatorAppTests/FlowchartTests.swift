@@ -11,7 +11,7 @@ struct FlowchartTests {
         let name = "FlowchartTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let create = { FlowchartSession(defaults: defaults) { _, _ in throw FlowchartError.message("not called") } }
+        let create = { FlowchartSession(defaults: defaults) { _, _, _ in throw FlowchartError.message("not called") } }
         let blank = create()
         #expect(blank.state.input.isEmpty)
         #expect(blank.state.document == .empty)
@@ -58,7 +58,7 @@ struct FlowchartTests {
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
         var calls = 0
-        let session = FlowchartSession(defaults: defaults) { _, _ in
+        let session = FlowchartSession(defaults: defaults) { _, _, _ in
             calls += 1
             return FlowchartResponse(diagram: .example, model: "test", aiMS: 1)
         }
@@ -69,7 +69,7 @@ struct FlowchartTests {
         session.selectProvider(.codex)
         #expect(session.state.document.steps[0].title == "编译器")
         #expect(calls == 0)
-        let restored = FlowchartSession(defaults: defaults) { _, _ in throw FlowchartError.message("not called") }
+        let restored = FlowchartSession(defaults: defaults) { _, _, _ in throw FlowchartError.message("not called") }
         #expect(restored.state.style == .staircase)
         #expect(restored.provider == .qwen)
         #expect(restored.state.document.title == "编辑后的标题")
@@ -77,14 +77,22 @@ struct FlowchartTests {
     }
 
     @Test @MainActor
-    func generationCapturesProviderAndFailureKeepsDocument() async throws {
+    func generationCapturesProviderAndReasoningAndFailureKeepsDocument() async throws {
         let name = "FlowchartTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
         var suppliedProvider: ModelProvider?
+        var suppliedReasoning: ModelReasoning?
         var shouldFail = false
-        let session = FlowchartSession(defaults: defaults) { _, provider in
+        let globalSelection = ModelSelectionStore(defaults: defaults)
+        globalSelection.select(.codex)
+        globalSelection.selectReasoning(.high)
+        globalSelection.select(.qwen)
+        let session = FlowchartSession(defaults: defaults,
+                                       defaultProvider: { globalSelection.provider },
+                                       reasoningForProvider: { globalSelection.reasoning(for: $0) }) { _, provider, reasoning in
             suppliedProvider = provider
+            suppliedReasoning = reasoning
             if shouldFail { throw FlowchartError.message("模型不可用") }
             return FlowchartResponse(diagram: .example, model: provider.rawValue, aiMS: 123)
         }
@@ -92,14 +100,21 @@ struct FlowchartTests {
         session.selectProvider(.codex)
         session.generate()
         session.selectProvider(.qwen)
+        #expect(globalSelection.provider == .qwen)
+        globalSelection.select(.codex)
+        globalSelection.selectReasoning(.fastest)
         while session.isGenerating { await Task.yield() }
         #expect(suppliedProvider == .codex)
+        #expect(suppliedReasoning == .high)
         #expect(session.provider == .qwen)
         #expect(session.lastAIMS == 123)
+        #expect(session.status == "已生成·codex-高 0.1秒")
         let previous = session.state.document
         shouldFail = true
         session.generate()
         while session.isGenerating { await Task.yield() }
+        #expect(suppliedProvider == .qwen)
+        #expect(suppliedReasoning == .fastest)
         #expect(session.hasError)
         #expect(session.state.document == previous)
     }
@@ -109,7 +124,7 @@ struct FlowchartTests {
         let name = "FlowchartTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let session = FlowchartSession(defaults: defaults) { _, _ in
+        let session = FlowchartSession(defaults: defaults) { _, _, _ in
             try? await Task.sleep(nanoseconds: 100_000_000)
             return FlowchartResponse(diagram: .example, model: "late", aiMS: 100)
         }
@@ -457,7 +472,7 @@ struct FlowchartTests {
         try await supervisor.ensureBackendRunning()
         let client = FlowchartClient(configuration: configuration)
         do {
-            _ = try await client.generate(text: "", provider: .qwen)
+            _ = try await client.generate(text: "", provider: .qwen, reasoning: .fastest)
             Issue.record("Empty input should not reach the model")
         } catch {
             #expect(error.localizedDescription == "请输入流程描述。")

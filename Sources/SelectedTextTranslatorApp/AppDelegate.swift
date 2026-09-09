@@ -54,9 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         self.polishWindowController = ContentPolishWindowController(session: ContentPolishSession { request in
             let provider = selection.provider
+            let reasoning = selection.reasoning(for: provider)
             try await supervisor.ensureBackendRunning()
             try Task.checkCancellation()
-            return try await client.polish(request, provider: provider)
+            return try await client.polish(request, provider: provider, reasoning: reasoning)
         })
         super.init()
         selection.onChange = { [weak self] in self?.updateModelMenu() }
@@ -277,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// connectivity, or the remote model request.
     private func translateCurrentSelection() async {
         let provider = modelSelection.provider
+        let reasoning = modelSelection.reasoning(for: provider)
         isTranslating = true
         floatingPanel.showLoading("正在读取选中文字...")
         defer {
@@ -288,8 +290,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             try await backendSupervisor.ensureBackendRunning()
             let selectedText = try await selectionReader.readSelectedText()
             floatingPanel.showLoading("正在翻译...")
-            let translation = try await backendClient.translate(selectedText, targetLanguage: "auto", provider: provider)
-            floatingPanel.showResult(translation, sourceText: selectedText)
+            let result = try await backendClient.translate(selectedText, targetLanguage: "auto",
+                                                           provider: provider, reasoning: reasoning)
+            floatingPanel.showResult(result.text, sourceText: selectedText, completion: result.completion)
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             floatingPanel.showError(message)
@@ -347,6 +350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if flowchartWindowController == nil {
             flowchartWindowController = FlowchartWindowController(defaultProvider: { [modelSelection] in
                 modelSelection.provider
+            }, reasoningForProvider: { [modelSelection] provider in
+                modelSelection.reasoning(for: provider)
             }) { [weak self] in
                 guard let self else { throw CancellationError() }
                 try await self.backendSupervisor.ensureBackendRunning()

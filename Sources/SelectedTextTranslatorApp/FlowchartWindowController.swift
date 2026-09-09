@@ -37,14 +37,16 @@ final class FlowchartWindowController: NSWindowController, NSWindowDelegate, NST
 
     init(configuration: AppConfiguration = AppConfiguration(), defaults: UserDefaults = .standard,
          defaultProvider: @escaping () -> ModelProvider = { .qwen },
+         reasoningForProvider: @escaping (ModelProvider) -> ModelReasoning = { _ in .fastest },
          revealExport: @escaping (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) },
          ensureBackend: @escaping () async throws -> Void) {
         let client = FlowchartClient(configuration: configuration)
         self.revealExport = revealExport
-        session = FlowchartSession(defaults: defaults, defaultProvider: defaultProvider) { text, provider in
+        session = FlowchartSession(defaults: defaults, defaultProvider: defaultProvider,
+                                   reasoningForProvider: reasoningForProvider) { text, provider, reasoning in
             try await ensureBackend()
             try Task.checkCancellation()
-            return try await client.generate(text: text, provider: provider)
+            return try await client.generate(text: text, provider: provider, reasoning: reasoning)
         }
         let window = FlowchartWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],

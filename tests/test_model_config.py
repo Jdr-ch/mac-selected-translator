@@ -99,7 +99,8 @@ class ModelConfigurationTests(unittest.TestCase):
         with self.assertRaises(ModelConfigurationError):
             self.reader.read("../qwen")
 
-    def test_actual_sdk_uses_responses_for_codex_and_preserves_qwen_thinking(self) -> None:
+    def test_actual_sdk_overrides_reasoning_without_changing_cli_settings(self) -> None:
+        originals = {path: path.read_bytes() for path in self.home.rglob("*") if path.is_file()}
         requests = []
         diagram = {"title": "流程", "steps": [{"title": "步骤", "icon_id": "settings", "kind": "process"}]}
         answer = json.dumps(diagram)
@@ -125,23 +126,51 @@ class ModelConfigurationTests(unittest.TestCase):
         with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
             with patch("backend.translator_agent.model_config.ChatOpenAI",
                        side_effect=lambda **options: ChatOpenAI(http_client=transport, **options)):
-                for provider in ("codex", "qwen"):
-                    client = self.reader.client(provider, timeout=30)
+                choices = [("codex", "fastest"), ("qwen", "fastest"), ("codex", "medium"),
+                           ("codex", "high"), ("codex", "xhigh"), ("qwen", "thinking")]
+                for provider, reasoning in choices:
+                    client = self.reader.client(provider, timeout=30, reasoning=reasoning)
                     result = FlowchartAgent(client, max_input_chars=8000).generate("test")
                     self.assertEqual(result["diagram"]["steps"][0]["title"], "步骤")
                     self.assertEqual(result["model"], self.reader.read(provider).model)
         codex_url, codex_body, codex_auth = requests[0]
         self.assertEqual(str(codex_url), "https://codex.example/v1/responses")
-        self.assertEqual(codex_body["reasoning"]["effort"], "high")
+        self.assertEqual(codex_body["reasoning"]["effort"], "low")
         self.assertNotIn("temperature", codex_body)
         self.assertNotIn("enable_thinking", codex_body)
         self.assertEqual(codex_auth, "Bearer fake-codex-key")
         qwen_url, qwen_body, qwen_auth = requests[1]
         self.assertEqual(str(qwen_url), "https://qwen.example/v1/chat/completions")
-        self.assertTrue(qwen_body["enable_thinking"])
+        self.assertFalse(qwen_body["enable_thinking"])
         self.assertTrue(qwen_body["stream"])
         self.assertNotIn("contextWindowSize", qwen_body)
         self.assertEqual(qwen_auth, "Bearer fake-qwen-key")
+        self.assertEqual([body["reasoning"]["effort"] for _, body, _ in requests[2:5]],
+                         ["medium", "high", "xhigh"])
+        self.assertTrue(requests[5][1]["enable_thinking"])
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        self.assertEqual(self.reader.read("codex").options["reasoning_effort"], "high")
+        self.assertTrue(self.reader.read("qwen").options["extra_body"]["enable_thinking"])
+
+    def test_default_fastest_does_not_mutate_loaded_snapshots_or_other_options(self) -> None:
+        """Even a reused snapshot keeps nested generation settings intact across overrides."""
+        for provider in ("codex", "qwen"):
+            snapshot = self.reader.read(provider, include_credentials=True)
+            before = json.dumps(snapshot.options, sort_keys=True)
+            with patch.object(self.reader, "read", return_value=snapshot), \
+                 patch("backend.translator_agent.model_config.ChatOpenAI") as factory:
+                self.reader.client(provider, timeout=30)
+                sent = factory.call_args.kwargs
+                if provider == "codex":
+                    self.assertEqual(sent["reasoning_effort"], "low")
+                else:
+                    self.assertFalse(sent["extra_body"]["enable_thinking"])
+                self.assertEqual(sent["base_url"], snapshot.options["base_url"])
+                self.assertEqual(sent["temperature"], snapshot.options["temperature"])
+                self.assertEqual(json.dumps(snapshot.options, sort_keys=True), before)
+        for provider, reasoning in [("codex", "thinking"), ("qwen", "high"), ("qwen", None)]:
+            with self.assertRaises(ModelConfigurationError):
+                self.reader.client(provider, timeout=30, reasoning=reasoning)
 
     def test_local_http_routes_provider_and_exposes_only_metadata(self) -> None:
         reader = self.reader
@@ -151,9 +180,9 @@ class ModelConfigurationTests(unittest.TestCase):
             models = reader
             settings = SimpleNamespace(max_input_chars=8000)
 
-            def _agent_for_provider(self, provider):
+            def _agent_for_provider(self, provider, reasoning):
                 configuration = self.models.read(provider, include_credentials=True)
-                selected.append(configuration.provider)
+                selected.append((configuration.provider, reasoning))
                 llm = Mock()
                 llm.invoke.return_value = SimpleNamespace(content=configuration.model)
                 return TranslatorAgent(llm)
@@ -174,14 +203,14 @@ class ModelConfigurationTests(unittest.TestCase):
                 connection.close()
                 for path in ("/translate", "/polish"):
                     connection = HTTPConnection(*server.server_address, timeout=3)
-                    connection.request("POST", path, json.dumps({"provider": provider,
+                    connection.request("POST", path, json.dumps({"provider": provider, "reasoning": "fastest",
                         "text": "one two three four five six", "role": "开发", "scenario": "办公", "tone": "polite"}),
                         {"Content-Type": "application/json"})
                     response = connection.getresponse()
                     self.assertEqual(response.status, 200)
                     self.assertIn(reader.read(provider).model, response.read().decode())
                     connection.close()
-            self.assertEqual(selected, ["codex", "codex", "qwen", "qwen"])
+            self.assertEqual(selected, [(provider, "fastest") for provider in ("codex", "codex", "qwen", "qwen")])
             with patch.dict("os.environ", {}, clear=True):
                 self.assertEqual(Settings.from_env().port, 8765)
         finally:

@@ -19,14 +19,15 @@ struct BackendClient {
     ///
     /// The Python service resolves the chosen CLI configuration for each request;
     /// model credentials never enter the native UI or the local request body.
-    func translate(_ text: String, targetLanguage: String, provider: ModelProvider) async throws -> String {
+    func translate(_ text: String, targetLanguage: String, provider: ModelProvider,
+                   reasoning: ModelReasoning) async throws -> ModelTextResult {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         // Short translations may make a second model call to complete IPA.
         request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 2, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
-            TranslateRequest(text: text, targetLanguage: targetLanguage, provider: provider)
+            TranslateRequest(text: text, targetLanguage: targetLanguage, provider: provider, reasoning: reasoning)
         )
 
         do {
@@ -41,7 +42,8 @@ struct BackendClient {
             }
 
             let payload = try JSONDecoder().decode(TranslateResponse.self, from: data)
-            return payload.translation
+            return ModelTextResult(text: payload.translation,
+                                   completion: ModelCompletion(provider: provider, reasoning: reasoning, aiMS: payload.aiMS))
         } catch let error as TranslatorAppError {
             throw error
         } catch {
@@ -50,13 +52,13 @@ struct BackendClient {
     }
 
     /// Sends a source/context snapshot to the same local model service without translation parsing.
-    func polish(_ payload: PolishRequest, provider: ModelProvider) async throws -> String {
+    func polish(_ payload: PolishRequest, provider: ModelProvider, reasoning: ModelReasoning) async throws -> ModelTextResult {
         var request = URLRequest(url: polishEndpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 1, session: urlSession)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
-            PolishRequest(text: payload.text, preferences: payload.preferences, provider: provider)
+            PolishRequest(text: payload.text, preferences: payload.preferences, provider: provider, reasoning: reasoning)
         )
 
         do {
@@ -71,7 +73,9 @@ struct BackendClient {
                 let message = try? JSONDecoder().decode(ErrorResponse.self, from: data).error
                 throw TranslatorAppError.backendError(message ?? "润色服务返回 HTTP \(response.statusCode)。")
             }
-            return try JSONDecoder().decode(PolishResponse.self, from: data).polishedText
+            let result = try JSONDecoder().decode(PolishResponse.self, from: data)
+            return ModelTextResult(text: result.polishedText,
+                                   completion: ModelCompletion(provider: provider, reasoning: reasoning, aiMS: result.aiMS))
         } catch let error as TranslatorAppError {
             throw error
         } catch {

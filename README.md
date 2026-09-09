@@ -9,11 +9,12 @@
 - 对不暴露选中属性的 App，临时执行 `Command+C` 读取剪贴板，并尽量恢复原剪贴板内容。
 - 通过本地 HTTP 服务调用 LangChain `ChatOpenAI`。
 - 菜单中的“模型切换”提供 Codex / Qwen tabs；点击立即成为翻译和润色的全局默认，重启后保留选择。
-- 面板只显示模型名称和配置来源。模型、endpoint、认证及 Thinking/推理参数从各自 CLI 配置读取，App 不保存另一套配置。
+- 面板只读显示模型名称和配置来源，并提供 App 内推理强度选择。Codex 默认低强度，Qwen 默认关闭思考；模型、endpoint 和认证仍从各自 CLI 配置读取。
 - 生成流程图每次重新打开时默认选择当前全局模型；面板内的 Codex / Qwen 下拉选择只影响本次流程图，保留当前图表、编辑和导出功能。
 - 自动判断中英文方向：英文译中文，中文译英文，并给出常用候选译法。
 - 选中文本不超过 5 个词时，在主译后显示英文原词或英文主译中每个单词的 IPA 音标。
 - 翻译结果以浮层显示在鼠标附近，候选词带浅色背景，点击候选词即可复制并关闭浮层。
+- 翻译、润色和流程图的完成提示包含当次模型、强度和耗时，例如 `已生成·codex-中 10.5秒`。耗时由后端本地时钟统计，随结果返回，不增加模型调用；复制结果不包含提示。
 
 ## 初始化
 
@@ -31,7 +32,7 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 
 当前支持两者的 API Key 接入；不将 CLI 的 OAuth 登录态当作 API Key 使用。Qwen 使用模型名与 Base URL 同时匹配，避免同名的标准服务与 Coding Plan 混用密钥。
 
-首次默认选择 Qwen。打开面板、切换 tab、重新激活面板以及每次模型请求都会重新读取源配置；源配置错误时显示提示，不自动换用其他模型。请求开始后使用固定配置快照。App 只在 UserDefaults 中保存 `modelSelection.provider`，不改写上述文件或钥匙串。
+首次默认选择 Qwen。打开面板、切换 tab、重新激活面板以及每次模型请求都会重新读取源配置；源配置错误时显示提示，不自动换用其他模型。请求开始后使用固定配置快照。App 在 UserDefaults 中保存 `modelSelection.provider` 和按模型区分的 `modelSelection.reasoning.*`，仅覆盖 App 请求的推理参数，不改写上述文件或钥匙串。
 
 `.env` 只加载本地服务运行参数，旧的 `QWEN_MODEL`、`DASHSCOPE_BASE_URL` 和密钥配置不再作为模型来源。
 

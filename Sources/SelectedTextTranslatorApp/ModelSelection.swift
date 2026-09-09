@@ -7,6 +7,35 @@ enum ModelProvider: String, Codable, CaseIterable {
 
     var title: String { self == .codex ? "Codex" : "Qwen" }
     var source: String { self == .codex ? "~/.codex/config.toml" : "~/.qwen/settings.json" }
+
+    /// Qwen exposes a thinking switch; Codex exposes ordered effort levels.
+    var reasoningOptions: [ModelReasoning] {
+        self == .codex ? [.fastest, .medium, .high, .xhigh] : [.fastest, .thinking]
+    }
+}
+
+/// App-owned request overrides, independent of both CLI configuration files.
+enum ModelReasoning: String, Codable {
+    case fastest
+    case medium
+    case high
+    case xhigh
+    case thinking
+
+    /// Results use the short strength name; the picker additionally explains the fastest setting.
+    var summaryTitle: String {
+        switch self {
+        case .fastest: return "最快"
+        case .medium: return "中"
+        case .high: return "高"
+        case .xhigh: return "最高"
+        case .thinking: return "深度思考"
+        }
+    }
+
+    func title(for provider: ModelProvider) -> String {
+        self == .fastest ? (provider == .codex ? "最快（低）" : "最快（关闭思考）") : summaryTitle
+    }
 }
 
 /// The backend's public metadata deliberately contains no endpoint or authentication fields.
@@ -33,6 +62,22 @@ final class ModelSelectionStore {
         guard provider != self.provider else { return }
         self.provider = provider
         defaults.set(provider.rawValue, forKey: Self.storageKey)
+        onChange?()
+    }
+
+    /// Each provider starts at fastest and retains only its own App preference between launches.
+    func reasoning(for provider: ModelProvider) -> ModelReasoning {
+        guard let rawValue = defaults.string(forKey: "modelSelection.reasoning.\(provider.rawValue)"),
+              let value = ModelReasoning(rawValue: rawValue), provider.reasoningOptions.contains(value) else {
+            return .fastest
+        }
+        return value
+    }
+
+    /// The global panel is the sole writer; feature requests only read an immutable value.
+    func selectReasoning(_ reasoning: ModelReasoning) {
+        guard provider.reasoningOptions.contains(reasoning) else { return }
+        defaults.set(reasoning.rawValue, forKey: "modelSelection.reasoning.\(provider.rawValue)")
         onChange?()
     }
 }
@@ -65,6 +110,12 @@ final class ModelSelectionSession {
     func select(_ provider: ModelProvider) -> Task<Void, Never> {
         selection.select(provider)
         return refresh()
+    }
+
+    /// An App-only preference changes immediately without rereading or writing CLI metadata.
+    func selectReasoning(_ reasoning: ModelReasoning) {
+        selection.selectReasoning(reasoning)
+        onChange?()
     }
 
     /// Reopening or refocusing the window reloads external edits without persisting model metadata.

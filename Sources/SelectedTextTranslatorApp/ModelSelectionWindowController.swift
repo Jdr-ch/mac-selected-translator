@@ -1,12 +1,13 @@
 import AppKit
 
-/// Read-only model panel: the tabs select a provider, while all configuration stays in its CLI.
+/// CLI model metadata stays read-only; reasoning is a separate App-owned request preference.
 @MainActor
 final class ModelSelectionWindowController: NSWindowController, NSWindowDelegate {
     let session: ModelSelectionSession
     let modelLabel = NSTextField(labelWithString: "正在读取...")
     let sourceLabel = NSTextField(labelWithString: "")
     let defaultLabel = NSTextField(labelWithString: "全局默认")
+    let reasoningControl = NSPopUpButton()
     private(set) var tabs: [NSButton] = []
     private var indicators: [NSView] = []
     private let closeButton = NSButton(title: "", target: nil, action: nil)
@@ -14,7 +15,7 @@ final class ModelSelectionWindowController: NSWindowController, NSWindowDelegate
     init(session: ModelSelectionSession) {
         self.session = session
         let panel = ModelSelectionPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 552, height: 246),
+            contentRect: NSRect(x: 0, y: 0, width: 552, height: 302),
             styleMask: [.borderless], backing: .buffered, defer: false
         )
         panel.title = "模型切换"
@@ -94,7 +95,15 @@ final class ModelSelectionWindowController: NSWindowController, NSWindowDelegate
         sourceLabel.setAccessibilityLabel("配置来源")
         let footer = NSStackView(views: [sourceCaption, sourceLabel])
         footer.spacing = 12
-        for view in [title, closeButton, tabRow, tabRule, caption, modelLabel, selected, footerRule, footer] {
+        let reasoningCaption = NSTextField(labelWithString: "推理强度")
+        reasoningCaption.font = .systemFont(ofSize: 12)
+        reasoningCaption.textColor = .secondaryLabelColor
+        reasoningControl.target = self
+        reasoningControl.action = #selector(selectReasoning(_:))
+        reasoningControl.setAccessibilityLabel("推理强度")
+        reasoningControl.toolTip = "仅用于此 App，不修改 Codex 或 Qwen 配置"
+        for view in [title, closeButton, tabRow, tabRule, caption, modelLabel, selected,
+                     reasoningCaption, reasoningControl, footerRule, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -142,18 +151,29 @@ final class ModelSelectionWindowController: NSWindowController, NSWindowDelegate
             selected.centerYAnchor.constraint(equalTo: modelLabel.centerYAnchor),
             check.widthAnchor.constraint(equalToConstant: 12),
             check.heightAnchor.constraint(equalToConstant: 12),
+            reasoningCaption.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            reasoningCaption.centerYAnchor.constraint(equalTo: reasoningControl.centerYAnchor),
+            reasoningControl.trailingAnchor.constraint(equalTo: tabRow.trailingAnchor),
+            reasoningControl.topAnchor.constraint(equalTo: content.topAnchor, constant: 204),
+            reasoningControl.widthAnchor.constraint(equalToConstant: 200),
+            reasoningControl.heightAnchor.constraint(equalToConstant: 28),
             footerRule.leadingAnchor.constraint(equalTo: tabRow.leadingAnchor),
             footerRule.trailingAnchor.constraint(equalTo: tabRow.trailingAnchor),
-            footerRule.topAnchor.constraint(equalTo: content.topAnchor, constant: 199),
+            footerRule.topAnchor.constraint(equalTo: content.topAnchor, constant: 255),
             footer.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: tabRow.trailingAnchor),
-            footer.topAnchor.constraint(equalTo: content.topAnchor, constant: 214)
+            footer.topAnchor.constraint(equalTo: content.topAnchor, constant: 270)
         ])
     }
 
     /// Render loading/error text in the same stable layout; green denotes selection, not connectivity.
     private func render() {
         let provider = session.selection.provider
+        reasoningControl.removeAllItems()
+        reasoningControl.addItems(withTitles: provider.reasoningOptions.map { $0.title(for: provider) })
+        if let index = provider.reasoningOptions.firstIndex(of: session.selection.reasoning(for: provider)) {
+            reasoningControl.selectItem(at: index)
+        }
         for (index, value) in ModelProvider.allCases.enumerated() {
             let selected = value == provider
             tabs[index].contentTintColor = selected ? .controlAccentColor : .secondaryLabelColor
@@ -186,6 +206,13 @@ final class ModelSelectionWindowController: NSWindowController, NSWindowDelegate
     @objc private func selectTab(_ sender: NSButton) {
         guard ModelProvider.allCases.indices.contains(sender.tag) else { return }
         session.select(ModelProvider.allCases[sender.tag])
+    }
+
+    /// Resolve the menu against the active provider so its two different contracts cannot mix.
+    @objc private func selectReasoning(_ sender: NSPopUpButton) {
+        let options = session.selection.provider.reasoningOptions
+        guard options.indices.contains(sender.indexOfSelectedItem) else { return }
+        session.selectReasoning(options[sender.indexOfSelectedItem])
     }
 
     @objc private func closePanel() { close() }

@@ -33,16 +33,24 @@ struct TranslateRequest: Encodable {
     let text: String
     let targetLanguage: String
     let provider: ModelProvider
+    let reasoning: ModelReasoning
 
     enum CodingKeys: String, CodingKey {
         case text
         case provider
+        case reasoning
         case targetLanguage = "target_language"
     }
 }
 
 struct TranslateResponse: Decodable {
     let translation: String
+    let aiMS: Double
+
+    enum CodingKeys: String, CodingKey {
+        case translation
+        case aiMS = "ai_ms"
+    }
 }
 
 struct ErrorResponse: Decodable {
