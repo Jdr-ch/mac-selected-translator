@@ -113,6 +113,63 @@ struct WindowLayoutPlannerTests {
         #expect(result.allSatisfy(screen.contains))
     }
 
+    /// 四个指定应用按各自角位排列，位置随屏幕原点和可用区域变化，尺寸沿用实时窗口值。
+    @Test
+    func testOrganizedFramesAnchorNamedApplicationsToTheirCorners() {
+        let screen = CGRect(x: -1_440, y: 25, width: 1_440, height: 875)
+        let frames = [
+            CGRect(x: 100, y: 100, width: 400, height: 300),
+            CGRect(x: 100, y: 100, width: 500, height: 350),
+            CGRect(x: 100, y: 100, width: 400, height: 300),
+            CGRect(x: 100, y: 100, width: 500, height: 300)
+        ]
+
+        let result = WindowLayoutPlanner.organizedFrames(
+            for: frames,
+            in: screen,
+            bundleIdentifiers: [
+                "com.openai.codex",
+                "com.tencent.WeWorkMac",
+                "com.tencent.xinWeChat",
+                "com.ccswitch.desktop"
+            ]
+        )
+
+        #expect(result == [
+            CGRect(x: -1_440, y: 25, width: 400, height: 300),
+            CGRect(x: -1_440, y: 550, width: 500, height: 350),
+            CGRect(x: -400, y: 600, width: 400, height: 300),
+            CGRect(x: -500, y: 25, width: 500, height: 300)
+        ])
+    }
+
+    /// 即使普通窗口更大且排在输入首位，也必须先为指定应用占位，重复整理保持结果稳定。
+    @Test
+    func testOrganizedFramesReserveNamedApplicationSpaceBeforeLargerWindows() {
+        let screen = CGRect(x: 0, y: 0, width: 1_000, height: 800)
+        let frames = [
+            CGRect(x: 200, y: 200, width: 400, height: 800),
+            CGRect(x: 100, y: 100, width: 600, height: 500)
+        ]
+        let bundleIdentifiers = ["com.apple.Terminal", "com.openai.codex"]
+
+        let result = WindowLayoutPlanner.organizedFrames(
+            for: frames,
+            in: screen,
+            bundleIdentifiers: bundleIdentifiers
+        )
+
+        #expect(result == [
+            CGRect(x: 600, y: 0, width: 400, height: 800),
+            CGRect(x: 0, y: 0, width: 600, height: 500)
+        ])
+        #expect(WindowLayoutPlanner.organizedFrames(
+            for: result,
+            in: screen,
+            bundleIdentifiers: bundleIdentifiers
+        ) == result)
+    }
+
     /// Verifies two aligned windows each occupy one full-height half of the screen.
     @Test
     func testAlignedFramesUseFullHeightForTwoWindows() {

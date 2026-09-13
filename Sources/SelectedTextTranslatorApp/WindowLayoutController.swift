@@ -45,14 +45,46 @@ enum WindowGeometryMutation: Equatable {
 
 /// Calculates target geometry independently from Accessibility side effects.
 struct WindowLayoutPlanner {
-    /// Places fixed-size windows against screen or window edges, choosing the lowest-overlap candidate each time.
-    static func organizedFrames(for frames: [CGRect], in screen: CGRect) -> [CGRect] {
+    /// 整理专用角位：0 左上、1 右上、2 左下、3 右下，使用应用 Bundle ID 避免误匹配辅助进程。
+    private static let organizationCornerIndexes: [String: Int] = [
+        "com.openai.codex": 0,
+        "com.tencent.weworkmac": 2,
+        "com.tencent.xinwechat": 3,
+        "com.ccswitch.desktop": 1
+    ]
+
+    /// 指定应用先按当前尺寸固定到屏幕角位，其余窗口保持尺寸并寻找重叠最少的贴边位置。
+    static func organizedFrames(
+        for frames: [CGRect],
+        in screen: CGRect,
+        bundleIdentifiers: [String?] = []
+    ) -> [CGRect] {
         guard !frames.isEmpty, screen.width > 0, screen.height > 0 else {
             return []
         }
 
-        // Larger visible windows claim space first so smaller windows can fill the remaining gaps with less overlap.
-        let orderedIndexes = frames.indices.sorted { left, right in
+        // 应用标识与输入窗口按索引对应；角位实时基于当前屏幕计算，不保存绝对桌面坐标。
+        var fixedIndexes: Set<Int> = []
+        var result = frames
+        for index in frames.indices {
+            guard
+                bundleIdentifiers.indices.contains(index),
+                let bundleIdentifier = bundleIdentifiers[index],
+                let cornerIndex = organizationCornerIndexes[bundleIdentifier.lowercased()]
+            else {
+                continue
+            }
+            result[index].origin = anchoredOrigin(
+                for: frames[index].size,
+                cornerIndex: cornerIndex,
+                in: screen
+            )
+            fixedIndexes.insert(index)
+        }
+        var placedVisibleFrames = fixedIndexes.sorted().map { result[$0].intersection(screen) }
+
+        // 固定区域先占位，再让较大的普通窗口优先排列，避免后续算法覆盖预设。
+        let orderedIndexes = frames.indices.filter { !fixedIndexes.contains($0) }.sorted { left, right in
             let leftArea = visibleArea(of: frames[left].size, in: screen)
             let rightArea = visibleArea(of: frames[right].size, in: screen)
             if leftArea == rightArea {
@@ -60,9 +92,6 @@ struct WindowLayoutPlanner {
             }
             return leftArea > rightArea
         }
-        var result = frames
-        var placedVisibleFrames: [CGRect] = []
-
         for index in orderedIndexes {
             let size = frames[index].size
             let origin = bestOrganizedOrigin(
@@ -259,12 +288,13 @@ final class WindowLayoutController {
     /// Cleared after organizing; a mismatched window set or frame resets the next alignment to the first order.
     private var alignmentSnapshot: AlignmentSnapshot?
 
-    /// Rearranges windows on the pointer's screen without changing their current sizes.
+    /// 整理鼠标所在屏幕时先固定四个指定应用的角位，其余窗口按剩余空间排列，所有窗口保留尺寸。
     func organizeCurrentScreen() throws {
         let context = try currentLayoutContext()
         let targetFrames = WindowLayoutPlanner.organizedFrames(
             for: context.windows.map(\.frame),
-            in: context.screenFrame
+            in: context.screenFrame,
+            bundleIdentifiers: context.windows.map(\.bundleIdentifier)
         )
         try apply(
             targetFrames,
