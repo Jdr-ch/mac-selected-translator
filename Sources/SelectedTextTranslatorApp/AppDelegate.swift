@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let selectionReader = AccessibilitySelectionReader()
     private let floatingPanel = FloatingPanelController()
     private let windowLayoutController = WindowLayoutController()
+    /// 工作场景面板按需创建，避免启动翻译 App 时读取其他应用窗口。
+    private var workspaceSceneWindowController: WorkspaceSceneWindowController?
     private let sleepPreventionController = SleepPreventionController()
     private let iphoneLocationWindowController: IPhoneLocationWindowController
     /// Created on first use so the diagram renderer does not delay the menu-bar app's startup.
@@ -84,6 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleTranslateShortcut()
         }
         hotkeyMonitor?.start()
+        // 安装验收或用户快捷指令可直接打开工作场景面板，普通登录启动仍保持菜单栏模式。
+        if ProcessInfo.processInfo.arguments.contains("--workspace") { showWorkspaceScene() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -123,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "整理", action: #selector(organizeWindows)))
         menu.addItem(makeMenuItem(title: "对齐", action: #selector(alignWindows)))
+        menu.addItem(makeMenuItem(title: "工作场景…", action: #selector(showWorkspaceScene)))
         let sleepMenuItem = makeMenuItem(
             title: sleepPreventionController.actionTitle,
             action: #selector(toggleSleepPrevention)
@@ -351,6 +356,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Repositions visible windows on the screen where the status menu was opened.
     @objc private func organizeWindows() {
         performWindowLayout(windowLayoutController.organizeCurrentScreen)
+    }
+
+    /// 单一入口复用场景窗口，采集、保存和恢复由窗口内的按钮明确触发。
+    @objc private func showWorkspaceScene() {
+        if workspaceSceneWindowController == nil { workspaceSceneWindowController = WorkspaceSceneWindowController() }
+        workspaceSceneWindowController?.show()
     }
 
     /// Resizes and places visible windows into the four requested screen anchors.

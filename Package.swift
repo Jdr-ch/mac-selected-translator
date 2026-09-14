@@ -11,13 +11,20 @@ let package = Package(
         .executable(
             name: "SelectedTextTranslatorApp",
             targets: ["SelectedTextTranslatorApp"]
+        ),
+        .executable(
+            name: "WorkspaceChromeHost",
+            targets: ["WorkspaceChromeHost"]
         )
     ],
     targets: [
         .executableTarget(
             name: "SelectedTextTranslatorApp",
+            dependencies: ["WorkspaceSkyLightBridge"],
             resources: [.copy("Resources/Flowchart")]
         ),
+        .target(name: "WorkspaceSkyLightBridge", cSettings: [.unsafeFlags(["-fobjc-arc"])]),
+        .executableTarget(name: "WorkspaceChromeHost"),
         .testTarget(
             name: "SelectedTextTranslatorAppTests",
             dependencies: ["SelectedTextTranslatorApp"],

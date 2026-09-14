@@ -18,6 +18,9 @@ rm -rf "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 cp "${ROOT_DIR}/.build/release/${EXECUTABLE_NAME}" "${MACOS_DIR}/${EXECUTABLE_NAME}"
 chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
+# Chrome 原生消息桥随 App 分发，扩展源码保持在独立目录。
+cp "${ROOT_DIR}/.build/release/WorkspaceChromeHost" "${MACOS_DIR}/WorkspaceChromeHost"
+chmod +x "${MACOS_DIR}/WorkspaceChromeHost"
 # Keep the local renderer available without depending on SwiftPM's development build directory.
 ditto "${ROOT_DIR}/Sources/SelectedTextTranslatorApp/Resources/Flowchart" "${RESOURCES_DIR}/Flowchart"
 

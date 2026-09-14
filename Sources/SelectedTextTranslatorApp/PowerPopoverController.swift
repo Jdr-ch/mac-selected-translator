@@ -8,6 +8,9 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
     private let popover = NSPopover()
     let content: PowerPopoverContentController
     private weak var statusButton: NSStatusBarButton?
+    /// 仅在面板展开时监听点击；本地与全局监听分别覆盖本应用和其他应用。
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
 
     var isShown: Bool { popover.isShown }
 
@@ -44,7 +47,11 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
         content.focusCommand(at: 0)
     }
 
-    func close() { popover.performClose(nil) }
+    /// 所有关闭路径先解除监听，避免残留回调干扰下一次展开。
+    func close() {
+        stopDismissalMonitoring()
+        popover.performClose(nil)
+    }
 
     func update(snapshot: PowerSnapshot, presentation: PowerPresentation) {
         content.info.update(snapshot: snapshot, presentation: presentation)
@@ -52,11 +59,71 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
 
     func refreshCommands() { content.refreshCommands() }
 
-    func popoverDidShow(_ notification: Notification) { onVisibilityChange?(true) }
+    /// 原生展示完成后再安装监听，避免把打开面板的点击当成外部点击。
+    func popoverDidShow(_ notification: Notification) {
+        startDismissalMonitoring()
+        onVisibilityChange?(true)
+    }
 
+    /// 原生 transient 自动关闭也要执行相同清理，并恢复按钮与采样状态。
     func popoverDidClose(_ notification: Notification) {
+        stopDismissalMonitoring()
         statusButton?.highlight(false)
         onVisibilityChange?(false)
+    }
+
+    /// 补齐 transient 未覆盖的桌面点击、同应用其他窗口点击和桌面切换。
+    private func startDismissalMonitoring() {
+        stopDismissalMonitoring()
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        // AppKit 保证鼠标监听在主线程回调，同步处理可避免异步关闭误伤新展开的面板。
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
+            MainActor.assumeIsolated { self?.close() }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let self, self.isOutsideClick(event) { self.close() }
+            }
+            return event
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(dismissForContextChange),
+                                               name: NSApplication.didResignActiveNotification, object: NSApp)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(dismissForContextChange),
+                                                          name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+    }
+
+    /// 面板及其子窗口、下拉菜单不视为外部；状态按钮保留自己的再次点击关闭链路。
+    private func isOutsideClick(_ event: NSEvent) -> Bool {
+        guard isShown else { return false }
+        var eventWindow = event.window
+        while let window = eventWindow {
+            if window === content.view.window || window.level == .popUpMenu { return false }
+            eventWindow = window.parent
+        }
+        if let button = statusButton, let window = button.window, event.window === window {
+            let point = button.convert(event.locationInWindow, from: nil)
+            if button.bounds.contains(point) { return false }
+        }
+        return true
+    }
+
+    /// 切换应用或 Space 后，旧上下文的临时面板不再保持展开。
+    @objc private func dismissForContextChange(_ notification: Notification) { close() }
+
+    /// 幂等清理允许主动关闭和原生关闭回调先后到达，不累积监听器。
+    private func stopDismissalMonitoring() {
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+        localMouseMonitor = nil
+        globalMouseMonitor = nil
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
+        NSWorkspace.shared.notificationCenter.removeObserver(self, name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+    }
+
+    deinit {
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
+        if let globalMouseMonitor { NSEvent.removeMonitor(globalMouseMonitor) }
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 }
 
