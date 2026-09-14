@@ -89,6 +89,8 @@ struct WorkspaceOutcome {
     var windowID: String
     var label: String
     var error: String?
+    /// 恢复成功后的实际系统窗口编号，仅供本次面板会话的桌面对齐使用，不写入场景模板。
+    var nativeWindowID: UInt32? = nil
 }
 
 enum WorkspaceError: LocalizedError {

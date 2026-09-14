@@ -141,7 +141,11 @@ struct WorkspaceDesktopWorkflowTests {
     }
 
     @Test @MainActor func concurrentRestoreIsBoundedAndFailureDoesNotCancelOthers() async {
-        let entries = (1...8).map { entry($0) }
+        let entries = (1...8).map { ordinal in
+            var window = entry(ordinal)
+            window.bundleID = "test.independent-app"
+            return window
+        }
         var active = 0
         var peak = 0
         var finished: [String] = []
@@ -157,6 +161,50 @@ struct WorkspaceDesktopWorkflowTests {
         #expect(finished.count == 8)
         #expect(result.map(\.windowID) == entries.map(\.id))
         #expect(result.filter { $0.error != nil }.count == 1)
+    }
+
+    /// 多个 IDE 项目必须依次完成；失败释放串行位置，Chrome 在等待期间仍可启动。
+    @Test @MainActor func webStormRestoresSeriallyAndOtherAppsCanProceed() async {
+        var browser = entry(4)
+        browser.bundleID = "com.google.Chrome"
+        let entries = [entry(1), entry(2), entry(3), browser]
+        var activeIDE = 0
+        var idePeak = 0
+        var browserOverlapped = false
+        var opened: [String] = []
+        let results = await WorkspaceRestoreScheduler.run(entries, operation: { window in
+            let ide = window.bundleID == "com.jetbrains.WebStorm"
+            if ide { activeIDE += 1; idePeak = max(idePeak, activeIDE); opened.append(window.id) }
+            else { browserOverlapped = activeIDE > 0 }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            if ide { activeIDE -= 1 }
+            return WorkspaceOutcome(windowID: window.id, label: window.label, error: window.id == entries[1].id ? "模拟打开失败" : nil)
+        }, finished: { _ in })
+        #expect(idePeak == 1)
+        #expect(browserOverlapped)
+        #expect(opened == Array(entries.prefix(3)).map(\.id))
+        #expect(results.count == 4)
+        #expect(results.filter { $0.error != nil }.count == 1)
+    }
+
+    /// 缺项提示必须包含每个窗口和对应修复方式；补齐一个项目后只清除此窗口的项目缺项。
+    @Test @MainActor func missingInformationNamesEachWindowAndClearsWhenCorrected() {
+        let controller = WorkspaceSceneController()
+        var first = entry(3, title: "alpha")
+        first.projectPath = nil
+        first.issues = ["缺少项目路径，请选择项目文件夹。"]
+        var second = entry(3, title: "beta")
+        second.issues = ["未能读取窗口属性，请重新采集。"]
+        let key = first.desktop.selectionKey
+        controller.library.drafts[key] = WorkspaceDesktopDraft(desktop: first.desktop, windows: [first, second])
+        let issues = controller.library.issues(for: key)
+        #expect(issues.count == 2)
+        #expect(issues[0].contains("alpha") && issues[0].contains("选择项目文件夹"))
+        #expect(issues[1].contains("beta") && issues[1].contains("重新采集"))
+        controller.updateProject(first, path: "/tmp/alpha")
+        #expect(controller.library.issues(for: key).count == 1)
+        #expect(controller.library.windows(for: key)[0].issues.isEmpty)
+        #expect(controller.activity(for: first.desktop).failed)
     }
 
     @Test @MainActor func chromeResourceGateSerializesOnlySharedMutation() async {

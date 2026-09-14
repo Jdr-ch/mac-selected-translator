@@ -16,17 +16,19 @@ final class WorkspaceRestoreRunner {
 
     /// 目标桌面已集中准备；每个条目独立报告结果，最后以实际 Space 和窗口几何回读为准。
     func restore(_ entry: WorkspaceWindow, target: Result<WorkspaceDesktop, Error>?, scene: WorkspaceScene) async -> WorkspaceOutcome {
+        var stage = "检查恢复条件"
         do {
             guard entry.issues.isEmpty else { throw WorkspaceError.message(entry.issues.joined(separator: "；")) }
             guard let target else { throw WorkspaceError.message("未准备好\(entry.desktop.label)，请重试。") }
             let desktop = try target.get()
             let native: WorkspaceNativeWindow
+            stage = "打开或匹配窗口"
             if entry.chrome != nil {
                 native = try await restoreChrome(entry, profile: scene.profileToken,
                     profileDirectory: scene.chromeProfileDirectory, sceneWindowIDs: scene.windows.filter { $0.chrome != nil }.map(\.id))
             } else {
-                // 相同项目或普通应用共享启动锁；不同 WebStorm 项目仍然并行加载。
-                native = try await exclusive("app:\(entry.bundleID):\(entry.projectPath ?? "")") {
+                // 同一应用共用启动入口；WebStorm 的完整恢复另由调度器按项目串行安排。
+                native = try await exclusive("app:\(entry.bundleID)") {
                     try await self.restoreApplication(entry)
                 }
             }
@@ -35,8 +37,11 @@ final class WorkspaceRestoreRunner {
             }
             let currentTarget = try WorkspaceGeometry.resolve(desktop, in: catalog.desktop.desktops())
             let frame = WorkspaceGeometry.absolute(entry.relativeFrame, in: currentTarget.screenFrame)
+            stage = "设置窗口位置和大小"
             try catalog.applyFrame(frame, to: native)
+            stage = "移动到\(currentTarget.label)"
             try await catalog.desktop.move(native.id, to: currentTarget)
+            stage = "验证桌面和布局"
             try catalog.applyFrame(frame, to: native)
             try await waitFor(timeout: 5, failure: "\(entry.label)的桌面或位置验证超时，请重试该条目。") { () async throws -> Bool? in
                 guard try self.catalog.desktop.spaces(for: native.id) == [currentTarget.spaceID],
@@ -44,9 +49,9 @@ final class WorkspaceRestoreRunner {
                       WorkspaceWindowCatalog.distance(current, frame) <= 8 else { return nil }
                 return true
             }
-            return WorkspaceOutcome(windowID: entry.id, label: entry.label)
+            return WorkspaceOutcome(windowID: entry.id, label: entry.label, nativeWindowID: native.id)
         } catch {
-            return WorkspaceOutcome(windowID: entry.id, label: entry.label, error: error.localizedDescription)
+            return WorkspaceOutcome(windowID: entry.id, label: entry.label, error: "\(stage)：\(error.localizedDescription)")
         }
     }
 
@@ -136,7 +141,9 @@ final class WorkspaceRestoreRunner {
         } else {
             _ = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
         }
-        return try await waitFor(timeout: 60, failure: "等待\(entry.label)窗口启动超时，请确认应用已完成加载后重试。") {
+        // 实际 IDE 日志出现启动 75 秒后才打开项目；为慢启动保留更长窗口，不重复发送打开请求。
+        let timeout: TimeInterval = entry.bundleID == "com.jetbrains.WebStorm" ? 120 : 60
+        return try await waitFor(timeout: timeout, failure: "等待\(entry.label)窗口超过 \(Int(timeout)) 秒。请检查 IDE 是否仍在加载、是否有项目打开确认框，或插件异常；处理后重试该窗口。") {
             try await self.matchingApplication(entry)
         }
     }

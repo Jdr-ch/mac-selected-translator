@@ -62,7 +62,10 @@ final class WorkspaceSceneController {
     func activity(for desktop: WorkspaceDesktop) -> WorkspaceDesktopActivity {
         let key = desktop.selectionKey
         if let activity = activities[key] { return activity }
-        if library.drafts[key] != nil { return WorkspaceDesktopActivity(message: "待保存") }
+        if library.drafts[key] != nil {
+            let count = library.issues(for: key).count
+            return WorkspaceDesktopActivity(message: count > 0 ? "\(count) 个窗口待补充" : "待保存", failed: count > 0)
+        }
         if savedKeys.contains(key) {
             return WorkspaceDesktopActivity(message: currentDesktops.contains(where: { $0.selectionKey == key }) ? "已保存" : "恢复时补建／重绑")
         }
@@ -125,12 +128,13 @@ final class WorkspaceSceneController {
                         desktop: desktop, relativeFrame: WorkspaceGeometry.relative(native.frame, in: desktop.screenFrame))
                     if native.bundleID == "com.jetbrains.WebStorm" {
                         entry.projectPath = catalog.projectPath(for: native)
-                        if entry.projectPath == nil { entry.issues.append("需要选择 WebStorm 项目文件夹。") }
+                        if entry.projectPath == nil { entry.issues.append("缺少项目路径。请切换到此窗口的详情 tab，点击“选择项目…”指定项目文件夹。") }
                     } else if native.bundleID == "com.google.Chrome" {
                         entry.chrome = chromeByNative[native.id]
-                        if entry.chrome == nil { entry.issues.append(chromeError ?? "无法匹配 Chrome 窗口，请重新采集。") }
+                        if entry.chrome == nil { entry.issues.append("缺少标签页和群组快照。" + (chromeError ?? "无法匹配 Chrome 窗口，请确认工作场景助手已连接，再重新采集本桌面。")) }
                         if entry.chrome?.groups.contains(where: { $0.title.isEmpty }) == true {
-                            entry.issues.append("请为未命名群组命名后重新采集。")
+                            let unnamed = entry.chrome?.groups.filter { $0.title.isEmpty }.count ?? 0
+                            entry.issues.append("有 \(unnamed) 个 Chrome 群组缺少名称。请在 Chrome 中命名，再重新采集本桌面。")
                         }
                     }
                     entries.append(entry)
@@ -138,18 +142,20 @@ final class WorkspaceSceneController {
                 for surface in unresolved where surface.spaceIDs == [desktop.spaceID] {
                     entries.append(WorkspaceWindow(bundleID: surface.bundleID, appName: surface.appName, title: surface.title,
                         desktop: desktop, relativeFrame: WorkspaceGeometry.relative(surface.frame, in: desktop.screenFrame),
-                        issues: ["该窗口暂未读取完成，请再次采集；仍失败时检查应用是否有待处理弹窗。"]))
+                        issues: ["未能读取该窗口的完整属性。请等待应用加载并处理其弹窗，再重新采集本桌面；不需要的窗口可从草稿移除。"]))
                 }
                 let key = desktop.selectionKey
                 library.drafts[key] = WorkspaceDesktopDraft(desktop: desktop, windows: entries,
                     profileToken: profile, profileDirectory: directory)
-                let incomplete = entries.contains { !$0.issues.isEmpty }
-                activities[key] = WorkspaceDesktopActivity(message: incomplete ? "有待补充条目" : "已采集 · 待保存", failed: incomplete)
+                let incomplete = entries.filter { !$0.issues.isEmpty }.count
+                activities[key] = WorkspaceDesktopActivity(message: incomplete > 0 ? "\(incomplete) 个窗口待补充" : "已采集 · 待保存", failed: incomplete > 0)
                 let ids = Set(library.saved?.windows.filter { $0.desktop.selectionKey == key }.map(\.id) ?? [])
                 outcomes.removeAll { ids.contains($0.windowID) }
                 retryDesktopKeys.remove(key)
             }
-            status = "已采集 \(targets.count) 个桌面。展开核对后，可逐桌面保存或保存所选。"
+            let pending = targets.filter { !library.issues(for: $0.selectionKey).isEmpty }
+            status = "已采集 \(targets.count) 个桌面。" + (pending.isEmpty ? "核对窗口详情后可保存。"
+                : pending.map(\.label).joined(separator: "、") + "有待补充信息，点击对应桌面查看具体要求。")
         } catch {
             for key in requested { activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true) }
             status = error.localizedDescription
@@ -202,18 +208,30 @@ final class WorkspaceSceneController {
             })
         await creation.finish()
         if let current = try? catalog.desktop.desktops() { currentDesktops = current }
+        let completion = WorkspaceDesktopCompletion()
+        // 完成钩子在每个桌面的最后一个窗口结束时触发；其他桌面仍可继续恢复。
+        func finishDesktop(_ desktop: WorkspaceDesktop) async {
+            await completion.finish(desktop, windows: scene.windows, outcomes: outcomes, align: {
+                try await WorkspaceDesktopAlignment.align(desktop, windows: scene.windows, outcomes: self.outcomes)
+            }, update: { activity in
+                self.activities[desktop.selectionKey] = activity
+                self.onChange?()
+            })
+        }
         for desktop in targets {
             let key = desktop.selectionKey
             if entries.contains(where: { $0.desktop.selectionKey == key }) {
                 activities[key] = WorkspaceDesktopActivity(message: "恢复中…", running: true)
             } else {
                 do {
-                    _ = try prepared[key]?.get()
-                    activities[key] = WorkspaceDesktopActivity(message: "已恢复 · 无窗口需要打开")
+                    guard let target = prepared[key] else { throw WorkspaceError.message("未准备好\(desktop.label)，请重试。") }
+                    _ = try target.get()
+                    // 对齐失败重试没有待打开窗口，沿用前次成功结果，仅重新执行本桌面对齐。
+                    await finishDesktop(desktop)
                 } catch { activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true) }
             }
         }
-        status = "正在并行恢复窗口…"
+        status = "正在恢复窗口，WebStorm 项目逐个打开…"
         onChange?()
         let runner = WorkspaceRestoreRunner(catalog: catalog, bridge: bridge)
         let result = await WorkspaceRestoreScheduler.run(entries, operation: { entry in
@@ -221,13 +239,7 @@ final class WorkspaceSceneController {
         }, finished: { outcome in
             self.outcomes.append(outcome)
             guard let entry = entries.first(where: { $0.id == outcome.windowID }) else { return }
-            let key = entry.desktop.selectionKey
-            let desktopIDs = Set(entries.filter { $0.desktop.selectionKey == key }.map(\.id))
-            let completed = self.outcomes.filter { desktopIDs.contains($0.windowID) }
-            if completed.count == desktopIDs.count {
-                let failures = completed.filter { $0.error != nil }.count
-                self.activities[key] = WorkspaceDesktopActivity(message: failures == 0 ? "已恢复并验证" : "\(failures) 项失败 · 可重试", failed: failures > 0)
-            }
+            await finishDesktop(entry.desktop)
             self.onChange?()
         })
         // UI 结果顺序固定为模板顺序，避免并发完成次序让明细跳动。
@@ -239,7 +251,7 @@ final class WorkspaceSceneController {
         retryDesktopKeys.subtract(selected)
         retryDesktopKeys.formUnion(failures)
         let desktopFailures = failures.count
-        status = desktopFailures == 0 ? "已恢复 \(selected.count) 个桌面、\(result.count) 个窗口。"
+        status = desktopFailures == 0 ? "已恢复并对齐 \(selected.count) 个桌面。"
             : "已完成 \(result.count - failed) 个窗口，\(desktopFailures) 个桌面需要处理，可重试失败项。"
     }
 
@@ -247,7 +259,7 @@ final class WorkspaceSceneController {
     func updateProject(_ entry: WorkspaceWindow, path: String) {
         library.edit(entry) { window in
             window.projectPath = path
-            window.issues.removeAll { $0.contains("项目文件夹") }
+            window.issues.removeAll { $0.contains("项目文件夹") || $0.contains("缺少项目路径") }
         }
         activities.removeValue(forKey: entry.desktop.selectionKey)
         status = "项目已更新，请保存所属桌面。"

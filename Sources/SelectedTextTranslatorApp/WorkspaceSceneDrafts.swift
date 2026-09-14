@@ -23,6 +23,11 @@ struct WorkspaceSceneDrafts {
         drafts[key]?.windows ?? saved?.windows.filter { $0.desktop.selectionKey == key } ?? []
     }
 
+    /// 桌面级缺项清单始终带上窗口身份，供采集提示、保存拦截和详情使用同一份说明。
+    func issues(for key: String) -> [String] {
+        windows(for: key).filter { !$0.issues.isEmpty }.map { "• \($0.label)：\($0.issues.joined(separator: "；"))" }
+    }
+
     /// 修改单个窗口前复制所属桌面的快照，避免对已保存模板产生隐式写入。
     mutating func edit(_ entry: WorkspaceWindow, change: (inout WorkspaceWindow) -> Void) {
         let key = entry.desktop.selectionKey
@@ -43,7 +48,7 @@ struct WorkspaceSceneDrafts {
     mutating func save(_ key: String, to store: WorkspaceSceneStore) throws {
         guard let draft = drafts[key] else { return }
         guard draft.windows.allSatisfy({ $0.issues.isEmpty }) else {
-            throw WorkspaceError.message("\(draft.desktop.label)有待补充条目，请展开检查后保存。")
+            throw WorkspaceError.message("\(draft.desktop.label)需要补充：\n" + issues(for: key).joined(separator: "\n"))
         }
         var merged = saved ?? WorkspaceScene(profileToken: "", chromeProfileDirectory: "", windows: [])
         let retained = merged.windows.filter { $0.desktop.selectionKey != key }

@@ -17,26 +17,34 @@ final class WorkspaceOperationGate {
     }
 }
 
-/// 控制同时启动的窗口数量；任务结束立即补位，单项错误不取消其他桌面的恢复。
+/// 控制窗口并发；WebStorm 共用 IDE 启动入口，必须等前一项目打开、定位完成再执行下一项。
 @MainActor
 enum WorkspaceRestoreScheduler {
     static func run(_ entries: [WorkspaceWindow], limit: Int = 4,
                     operation: @escaping @MainActor (WorkspaceWindow) async -> WorkspaceOutcome,
-                    finished: @escaping @MainActor (WorkspaceOutcome) -> Void) async -> [WorkspaceOutcome] {
+                    finished: @escaping @MainActor (WorkspaceOutcome) async -> Void) async -> [WorkspaceOutcome] {
         await withTaskGroup(of: (Int, WorkspaceOutcome).self) { group in
-            var next = 0
+            var pending = Array(entries.indices)
+            var active: Set<Int> = []
             var results: [Int: WorkspaceOutcome] = [:]
             func enqueue() {
-                guard next < entries.count else { return }
-                let index = next
-                let entry = entries[index]
-                next += 1
-                group.addTask { (index, await operation(entry)) }
+                while active.count < max(limit, 1) {
+                    let openingWebStorm = active.contains { entries[$0].bundleID == "com.jetbrains.WebStorm" }
+                    // 正在等待的 IDE 项目不占用执行名额，其他应用仍可继续恢复。
+                    guard let offset = pending.firstIndex(where: {
+                        !openingWebStorm || entries[$0].bundleID != "com.jetbrains.WebStorm"
+                    }) else { return }
+                    let index = pending.remove(at: offset)
+                    let entry = entries[index]
+                    active.insert(index)
+                    group.addTask { (index, await operation(entry)) }
+                }
             }
-            for _ in 0..<min(max(limit, 1), entries.count) { enqueue() }
+            enqueue()
             while let (index, outcome) = await group.next() {
+                active.remove(index)
                 results[index] = outcome
-                finished(outcome)
+                await finished(outcome)
                 enqueue()
             }
             return entries.indices.compactMap { results[$0] }

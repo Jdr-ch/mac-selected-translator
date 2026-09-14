@@ -22,22 +22,25 @@ private final class WorkspaceDesktopStack: NSStackView {
     override var isFlipped: Bool { true }
 }
 
-/// B 方案：桌面卡片和窗口详情共享 session；整行勾选与行内业务按钮使用独立事件入口。
+/// B 方案：桌面卡片与窗口 tabs 共享 session；浏览明细与批量勾选相互独立。
 @MainActor
 final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate {
     let session = WorkspaceSceneController()
     private let cards = WorkspaceDesktopStack()
     private let scroll = NSScrollView()
     private var cardViews: [String: WorkspaceDesktopCardView] = [:]
+    private var cardHeights: [String: NSLayoutConstraint] = [:]
     /// 明细焦点与恢复勾选分离：行内操作可查看该桌面，不修改批量操作范围。
     private var focusedDesktopKey: String?
     private var focusedWindowID: String?
+    /// 只在切换窗口时回到详情顶部；执行结果刷新不打断用户阅读长网址清单。
+    private var displayedWindowID: String?
     private var detailEntries: [WorkspaceWindow] = []
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let selectionLabel = NSTextField(labelWithString: "")
     private let details = NSTextView()
     private let detailTitle = NSTextField(labelWithString: "窗口详情")
-    private let windowPicker = NSPopUpButton()
+    private let windowTabs = WorkspaceWindowTabsView()
     private let selectAllButton = NSButton(checkboxWithTitle: "全选", target: nil, action: nil)
     private let refreshButton = WorkspaceSceneButton(title: "刷新桌面", target: nil, action: nil)
     private let captureButton = WorkspaceSceneButton(title: "采集所选", target: nil, action: nil)
@@ -100,7 +103,7 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         let controls: [(NSButton, Selector)] = [(selectAllButton, #selector(toggleAllDesktops)), (refreshButton, #selector(refreshDesktops)),
             (captureButton, #selector(capture)), (saveButton, #selector(save)), (restoreButton, #selector(restore)),
             (retryButton, #selector(retry)), (projectButton, #selector(selectProject)), (rebindButton, #selector(rebindDesktop)),
-            (removeButton, #selector(removeEntry)), (windowPicker, #selector(selectWindow))]
+            (removeButton, #selector(removeEntry))]
         for (button, action) in controls { button.target = self; button.action = action; button.isBordered = false }
         selectAllButton.allowsMixedState = true
         for button in [refreshButton, retryButton, projectButton, rebindButton, removeButton] { button.style = .link }
@@ -137,7 +140,7 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
             detailSurface.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 12),
             detailSurface.leadingAnchor.constraint(equalTo: actions.leadingAnchor), detailSurface.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
-            detailSurface.heightAnchor.constraint(equalToConstant: 188), footer.topAnchor.constraint(equalTo: detailSurface.bottomAnchor, constant: 10),
+            detailSurface.heightAnchor.constraint(equalToConstant: 236), footer.topAnchor.constraint(equalTo: detailSurface.bottomAnchor, constant: 10),
             footer.leadingAnchor.constraint(equalTo: actions.leadingAnchor), statusLabel.topAnchor.constraint(equalTo: footer.bottomAnchor, constant: 7),
             statusLabel.leadingAnchor.constraint(equalTo: actions.leadingAnchor), statusLabel.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
             statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
@@ -153,10 +156,7 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         surface.updateAppearance()
         detailTitle.font = .systemFont(ofSize: 13, weight: .medium)
         detailTitle.textColor = WorkspaceScenePalette.text
-        windowPicker.font = .systemFont(ofSize: 12)
-        windowPicker.setAccessibilityLabel("选择要查看的窗口")
-        let header = NSStackView(views: [detailTitle, windowPicker])
-        header.spacing = 12
+        windowTabs.onSelect = { [weak self] id in self?.focusedWindowID = id; self?.refreshDetails() }
         let detailScroll = NSScrollView()
         detailScroll.hasVerticalScroller = true
         detailScroll.autohidesScrollers = true
@@ -172,14 +172,15 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         detailScroll.documentView = details
         let edits = NSStackView(views: [projectButton, rebindButton, removeButton])
         edits.spacing = 12
-        for view in [header, detailScroll, edits] { view.translatesAutoresizingMaskIntoConstraints = false; surface.addSubview(view) }
+        for view in [detailTitle, windowTabs, detailScroll, edits] { view.translatesAutoresizingMaskIntoConstraints = false; surface.addSubview(view) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: surface.topAnchor, constant: 10), header.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 14),
-            header.trailingAnchor.constraint(lessThanOrEqualTo: surface.trailingAnchor, constant: -14), header.heightAnchor.constraint(equalToConstant: 25),
-            windowPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 440),
-            detailScroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6), detailScroll.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            detailTitle.topAnchor.constraint(equalTo: surface.topAnchor, constant: 10), detailTitle.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 14),
+            detailTitle.trailingAnchor.constraint(lessThanOrEqualTo: surface.trailingAnchor, constant: -14), detailTitle.heightAnchor.constraint(equalToConstant: 20),
+            windowTabs.topAnchor.constraint(equalTo: detailTitle.bottomAnchor, constant: 4), windowTabs.leadingAnchor.constraint(equalTo: detailTitle.leadingAnchor),
+            windowTabs.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -14), windowTabs.heightAnchor.constraint(equalToConstant: 38),
+            detailScroll.topAnchor.constraint(equalTo: windowTabs.bottomAnchor, constant: 6), detailScroll.leadingAnchor.constraint(equalTo: detailTitle.leadingAnchor),
             detailScroll.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -14),
-            edits.topAnchor.constraint(equalTo: detailScroll.bottomAnchor, constant: 5), edits.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            edits.topAnchor.constraint(equalTo: detailScroll.bottomAnchor, constant: 5), edits.leadingAnchor.constraint(equalTo: detailTitle.leadingAnchor),
             edits.heightAnchor.constraint(equalToConstant: 26), edits.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -8)
         ])
         return surface
@@ -191,14 +192,18 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         let keys = Set(desktops.map(\.selectionKey))
         for key in Set(cardViews.keys).subtracting(keys) {
             if let view = cardViews.removeValue(forKey: key) { cards.removeArrangedSubview(view); view.removeFromSuperview() }
+            cardHeights.removeValue(forKey: key)
         }
         for (index, desktop) in desktops.enumerated() {
             let key = desktop.selectionKey
             let card = cardViews[key] ?? WorkspaceDesktopCardView()
             if cardViews[key] == nil {
                 cardViews[key] = card
-                card.heightAnchor.constraint(equalToConstant: 90).isActive = true
+                let height = card.heightAnchor.constraint(equalToConstant: 90)
+                height.isActive = true
+                cardHeights[key] = height
                 card.onToggle = { [weak self] in self?.toggleDesktop(key) }
+                card.onFocus = { [weak self] in self?.focus(key) }
                 card.onCapture = { [weak self] in self?.focus(key); Task { await self?.session.capture(keys: [key]) } }
                 card.onSave = { [weak self] in self?.focus(key); self?.session.save(keys: [key]) }
                 card.onRestore = { [weak self] in self?.focus(key); Task { await self?.session.restore(keys: [key]) } }
@@ -208,7 +213,7 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
             card.configure(desktop: desktop, windows: session.library.windows(for: key), displayName: displayName(desktop),
                 saved: session.savedKeys.contains(key), draft: session.library.drafts[key] != nil,
                 selected: session.selectedKeys.contains(key), activity: session.activity(for: desktop), busy: session.busy,
-                canCapture: session.canCapture(key), canSave: session.canSave(key), canRestore: session.canRestore(key))
+                canCapture: session.canCapture(key), canSave: session.canSave(key), canRestore: session.canRestore(key), outcomes: session.outcomes)
         }
         if focusedDesktopKey == nil || !keys.contains(focusedDesktopKey!) {
             focusedDesktopKey = desktops.first(where: { session.savedKeys.contains($0.selectionKey) })?.selectionKey ?? desktops.first?.selectionKey
@@ -227,11 +232,17 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         layoutCards()
     }
 
-    /// 文档高度只随桌面数量变化；窗口缩放只重排宽度，长列表使用原生滚动条。
+    /// 卡片高度由实际标题换行决定；长桌面清单滚动展示，详情与操作区保持可见。
     private func layoutCards() {
         window?.contentView?.layoutSubtreeIfNeeded()
-        cards.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width,
-            height: CGFloat(cardViews.count) * 90 + CGFloat(max(cardViews.count - 1, 0)) * 8)
+        let width = scroll.contentSize.width
+        var height = CGFloat(max(cardViews.count - 1, 0)) * 8
+        for (key, card) in cardViews {
+            let rowHeight = card.preferredHeight(for: width)
+            cardHeights[key]?.constant = rowHeight
+            height += rowHeight
+        }
+        cards.frame = NSRect(x: 0, y: 0, width: width, height: height)
         cards.layoutSubtreeIfNeeded()
     }
     func windowDidResize(_ notification: Notification) { layoutCards() }
@@ -252,22 +263,34 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
 
     private func refreshDetails() {
         detailEntries = focusedDesktopKey.map { session.library.windows(for: $0) } ?? []
-        if !detailEntries.contains(where: { $0.id == focusedWindowID }) { focusedWindowID = detailEntries.first?.id }
-        windowPicker.removeAllItems()
-        windowPicker.addItems(withTitles: detailEntries.map(\.label))
-        if let index = detailEntries.firstIndex(where: { $0.id == focusedWindowID }) { windowPicker.selectItem(at: index) }
-        windowPicker.isEnabled = !detailEntries.isEmpty
+        if !detailEntries.contains(where: { $0.id == focusedWindowID }) {
+            // 首次进入桌面或重新采集后优先定位缺项，再定位恢复失败；正常刷新保留用户当前 tab。
+            focusedWindowID = detailEntries.first(where: { !$0.issues.isEmpty })?.id
+                ?? detailEntries.first(where: { entry in session.outcomes.contains { $0.windowID == entry.id && $0.error != nil } })?.id
+                ?? detailEntries.first?.id
+        }
+        windowTabs.configure(detailEntries.map { entry in
+            WorkspaceWindowPresentation(entry, outcome: session.outcomes.first { $0.windowID == entry.id })
+        }, selectedID: focusedWindowID)
         detailTitle.stringValue = (selectedDesktop()?.label ?? "桌面") + " · 窗口详情"
         projectButton.isEnabled = !session.busy && selectedEntry()?.bundleID == "com.jetbrains.WebStorm"
         rebindButton.isEnabled = !session.busy && focusedDesktopKey.map { session.savedKeys.contains($0) } == true
         removeButton.isEnabled = !session.busy && selectedEntry() != nil
         if let entry = selectedEntry() { details.string = detailText(entry) }
         else if let desktop = selectedDesktop() { details.string = "\(desktop.label) · \(session.activity(for: desktop).message)\n采集后可在这里检查窗口、群组和布局。" }
-        else { details.string = "点击桌面卡片可切换勾选，并在这里查看窗口详情。" }
+        else { details.string = "点击桌面卡片查看窗口详情；通过复选框勾选需要操作的桌面。" }
+        if displayedWindowID != focusedWindowID {
+            displayedWindowID = focusedWindowID
+            details.scrollToBeginningOfDocument(nil)
+        }
     }
 
-    /// 行内按钮只改变明细焦点，整行点击则同时切换勾选；运行中禁止改变执行范围。
-    private func focus(_ key: String) { focusedDesktopKey = key; focusedWindowID = nil; refreshDetails() }
+    /// 浏览桌面不修改批量范围；重复点击同一桌面保留已选窗口 tab，运行期间仍能查看结果。
+    private func focus(_ key: String) {
+        if focusedDesktopKey != key { focusedWindowID = nil }
+        focusedDesktopKey = key
+        refreshDetails()
+    }
     private func toggleDesktop(_ key: String) {
         guard !session.busy else { return }
         if session.selectedKeys.contains(key) { session.selectedKeys.remove(key) } else { session.selectedKeys.insert(key) }
@@ -278,11 +301,6 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         let keys = Set(session.desktops.map(\.selectionKey))
         session.selectedKeys = keys.isSubset(of: session.selectedKeys) ? [] : keys
         refresh()
-    }
-    @objc private func selectWindow() {
-        guard detailEntries.indices.contains(windowPicker.indexOfSelectedItem) else { return }
-        focusedWindowID = detailEntries[windowPicker.indexOfSelectedItem].id
-        refreshDetails()
     }
     @objc private func refreshDesktops() { session.refreshDesktops() }
     @objc private func capture() { Task { await session.capture() } }
@@ -326,9 +344,14 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
     /// 单项明细保留完整网址顺序、群组属性与布局；失败原因不依赖被截断的行内摘要。
     private func detailText(_ entry: WorkspaceWindow) -> String {
         let frame = WorkspaceGeometry.absolute(entry.relativeFrame, in: entry.desktop.screenFrame)
-        var lines = [entry.label, "\(entry.desktop.label) · 位置 (\(Int(frame.minX)), \(Int(frame.minY))) · 大小 \(Int(frame.width)) × \(Int(frame.height))"]
-        if let outcome = session.outcomes.first(where: { $0.windowID == entry.id }) { lines.append(outcome.error ?? "已恢复并验证") }
-        lines += entry.issues
+        let pending = session.library.issues(for: entry.desktop.selectionKey)
+        var lines = pending.isEmpty ? [] : ["待补充信息（处理后保存本桌面）"] + pending + [""]
+        let activity = session.activity(for: entry.desktop)
+        if activity.failed { lines += [activity.message, ""] }
+        lines += [entry.label, "\(entry.desktop.label) · 位置 (\(Int(frame.minX)), \(Int(frame.minY))) · 大小 \(Int(frame.width)) × \(Int(frame.height))"]
+        if let outcome = session.outcomes.first(where: { $0.windowID == entry.id }) {
+            lines.append(outcome.error.map { "恢复失败：\($0)" } ?? "已恢复并验证")
+        }
         if let path = entry.projectPath { lines.append("项目：\(path)") }
         if let chrome = entry.chrome {
             let colors = ["grey": "灰色", "blue": "蓝色", "red": "红色", "yellow": "黄色", "green": "绿色",

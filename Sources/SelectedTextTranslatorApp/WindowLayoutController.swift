@@ -329,6 +329,17 @@ final class WindowLayoutController {
         )
     }
 
+    /// 场景恢复明确传入目标窗口和屏幕坐标，复用菜单对齐规则及 AX 写入顺序，不读取鼠标或当前 Space。
+    /// 自动对齐始终使用第一次排列，不影响手动对齐的等尺寸轮换记录；返回目标布局供调用方回读验证。
+    func alignRestoredWindows(_ windows: [WorkspaceNativeWindow], in screenFrame: CGRect) throws -> [CGRect] {
+        guard !windows.isEmpty else { return [] }
+        let managed = windows.map { ManagedWindow(element: $0.element, frame: $0.frame, bundleIdentifier: $0.bundleID) }
+        let resizeMask = managed.map { WindowResizePolicy.allowsResize(bundleIdentifier: $0.bundleIdentifier) }
+        let frames = WindowLayoutPlanner.alignedFrames(for: managed.map(\.frame), resizeMask: resizeMask, in: screenFrame)
+        try apply(frames, to: managed, resizeMask: resizeMask)
+        return frames
+    }
+
     /// Resolves the current screen and matches its visible Core Graphics windows to controllable AX windows.
     private func currentLayoutContext() throws -> (screenFrame: CGRect, windows: [ManagedWindow]) {
         guard AXIsProcessTrusted() else {
