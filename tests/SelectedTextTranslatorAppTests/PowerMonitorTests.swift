@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import os
 @testable import SelectedTextTranslatorApp
 
 /// 电源字段、采集生命周期和原生面板的聚焦验收；不更改本机电源或休眠策略。
@@ -22,17 +23,21 @@ struct PowerMonitorTests {
         #expect(snapshot.inputWatts == 68.2)
         #expect(snapshot.batteryCurrent == 2.08)
         #expect(abs(try #require(snapshot.estimatedChargingWatts) - 25.376) < 0.001)
-        #expect(PowerPresentation(snapshot: snapshot, metric: .watts).menuValue == "≈25.4 W")
-        #expect(PowerPresentation(snapshot: snapshot, metric: .amperes).menuValue == "2.08 A")
+        let presentation = PowerPresentation(snapshot: snapshot, showPower: true)
+        #expect(presentation.menuValue == "≈25.4 W")
+        #expect(presentation.menuPowerDescription == "电池充电功率 ≈25.4 W")
     }
 
-    @Test func externalIdleHidesChargeValueAndUnplugClearsCachedAdapter() {
+    /// 接电暂停充电显示整机输入；拔电后隐藏数字，并清除驱动缓存的适配器数据。
+    @Test func externalIdleShowsInputAndUnplugClearsCachedAdapter() {
         var raw = Self.registry
         raw["IsCharging"] = false
         raw["Amperage"] = 0
         let idle = PowerSnapshot.decode(registry: raw, source: [:])
         #expect(idle.state == .externalPower)
-        #expect(PowerPresentation(snapshot: idle, metric: .watts).menuValue.isEmpty)
+        let presentation = PowerPresentation(snapshot: idle, showPower: true)
+        #expect(presentation.menuValue == "68.2 W")
+        #expect(presentation.menuPowerDescription == "系统输入功率 68.2 W")
         #expect(idle.inputWatts == 68.2)
         raw["ExternalConnected"] = false
         let unplugged = PowerSnapshot.decode(registry: raw, source: [:])
@@ -40,7 +45,40 @@ struct PowerMonitorTests {
         #expect(unplugged.adapterName == nil)
         #expect(unplugged.inputWatts == nil)
         #expect(unplugged.batteryVoltage == 12.2)
-        #expect(PowerPresentation(snapshot: unplugged, metric: .watts).showBattery)
+        let unpluggedPresentation = PowerPresentation(snapshot: unplugged, showPower: true)
+        #expect(unpluggedPresentation.showBattery)
+        #expect(unpluggedPresentation.menuValue.isEmpty)
+        #expect(unpluggedPresentation.menuPowerDescription == nil)
+    }
+
+    /// 新开关默认开启，旧电流选择不参与迁移；关闭与重新开启都能从独立偏好域回读。
+    @Test func powerPreferenceDefaultsOnAndPersistsExplicitChoice() throws {
+        let suiteName = "PowerMonitorTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        #expect(PowerDisplayPreference.isPowerShown(in: defaults))
+        defaults.set("amperes", forKey: "powerMonitor.displayMetric")
+        #expect(PowerDisplayPreference.isPowerShown(in: defaults))
+        for showPower in [false, true] {
+            defaults.set(showPower, forKey: PowerDisplayPreference.defaultsKey)
+            let reloaded = try #require(UserDefaults(suiteName: suiteName))
+            #expect(PowerDisplayPreference.isPowerShown(in: reloaded) == showPower)
+        }
+    }
+
+    /// 关闭仅隐藏菜单数字；面板读数仍可见，电池与未知状态即使带有旧输入值也不展示。
+    @Test func hiddenPowerPreservesPanelReadingsAcrossStates() {
+        for state in [PowerState.charging, .externalPower, .battery, .unavailable] {
+            var snapshot = PowerSnapshot.decode(registry: Self.registry, source: [:])
+            snapshot.state = state
+            let hidden = PowerPresentation(snapshot: snapshot, showPower: false)
+            #expect(hidden.menuValue.isEmpty)
+            #expect(hidden.menuPowerDescription == nil)
+            #expect(hidden.inputWatts == "68.2 W")
+            if state == .battery || state == .unavailable {
+                #expect(PowerPresentation(snapshot: snapshot, showPower: true).menuValue.isEmpty)
+            }
+        }
     }
 
     @Test func signedDischargeAndMissingDataNeverBecomeChargingPower() {
@@ -54,7 +92,7 @@ struct PowerMonitorTests {
         let invalid = PowerSnapshot.decode(registry: raw, source: [:])
         #expect(invalid.batteryCurrent == nil)
         #expect(invalid.batteryVoltage == nil)
-        #expect(PowerPresentation(snapshot: invalid, metric: .watts).menuValue == "—")
+        #expect(PowerPresentation(snapshot: invalid, showPower: true).menuValue == "—")
         #expect(PowerSnapshot.decode(registry: [:], source: [:]).state == .unavailable)
     }
 
@@ -66,6 +104,10 @@ struct PowerMonitorTests {
         #expect(snapshot.state == .externalPower)
         #expect(snapshot.batteryPercent == 95)
         #expect(snapshot.inputWatts == nil)
+        #expect(PowerPresentation(snapshot: snapshot, showPower: true).menuValue == "—")
+        var zeroInput = snapshot
+        zeroInput.inputWatts = 0
+        #expect(PowerPresentation(snapshot: zeroInput, showPower: true).menuValue == "0.0 W")
     }
 
     /// 合并通知风暴，并检验锁屏/睡眠交错及停止后不会重新创建周期任务。
@@ -95,6 +137,50 @@ struct PowerMonitorTests {
         #expect(monitor.interval == nil)
         #expect(changes == 1)
         #expect(PowerMonitor.pollingInterval(panelVisible: false, state: .battery, suspended: false) == 15)
+        #expect(PowerMonitor.pollingInterval(panelVisible: false, state: .externalPower, suspended: false) == 15)
+    }
+
+    /// 模拟实测设备消息，验证新功率不必等 15 秒，并且消息风暴、无关消息与暂停都沿用原调度。
+    @Test func batteryNotificationRefreshesInputWithoutWaitingForTimer() async throws {
+        let reading = OSAllocatedUnfairLock(initialState: PowerSnapshot(state: .externalPower, inputWatts: 44.9))
+        let monitor = PowerMonitor(reader: {
+            Thread.sleep(forTimeInterval: 0.025)
+            return reading.withLock { $0 }
+        })
+        defer { monitor.stop() }
+        monitor.start(observeSystem: false)
+        try await waitForSamples(1, in: monitor)
+        #expect(monitor.interval == 15)
+        #expect(!monitor.isObservingBatteryUpdates)
+        monitor.batteryServiceDidSend(0)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(monitor.sampleCount == 1)
+        reading.withLock { $0.inputWatts = 85.5 }
+        for _ in 0..<20 { monitor.batteryServiceDidSend(0xe0024100) }
+        try await waitForSamples(3, in: monitor)
+        #expect(monitor.sampleCount == 3)
+        #expect(monitor.snapshot.inputWatts == 85.5)
+        #expect(monitor.interval == 15)
+        monitor.setSuspended(locked: true)
+        monitor.batteryServiceDidSend(0xe0024100)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(monitor.sampleCount == 3)
+        monitor.setSuspended(locked: false)
+        try await waitForSamples(4, in: monitor)
+        monitor.stop()
+        monitor.batteryServiceDidSend(0xe0024100)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(monitor.sampleCount == 4)
+        #expect(monitor.interval == nil)
+    }
+
+    /// 有界等待后台读取完成；一秒内必须得到新样本，避免误把下一次 15 秒轮询当成通知生效。
+    private func waitForSamples(_ count: Int, in monitor: PowerMonitor) async throws {
+        for _ in 0..<100 {
+            if monitor.sampleCount >= count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(monitor.sampleCount >= count)
     }
 
     /// 标题缓存不改变动画图片大小，也不新增拦截点击的子视图。
@@ -108,7 +194,7 @@ struct PowerMonitorTests {
         button.image = animator.image(at: 0, isDark: false, reduceMotion: true)
         let display = PowerStatusDisplay()
         let snapshot = PowerSnapshot.decode(registry: Self.registry, source: [:])
-        let presentation = PowerPresentation(snapshot: snapshot, metric: .watts)
+        let presentation = PowerPresentation(snapshot: snapshot, showPower: true)
         for _ in 0..<90 { display.update(presentation, button: button) }
         #expect(display.renderCount == 1)
         #expect(button.image?.size == CGSize(width: 44, height: 22))
@@ -125,12 +211,30 @@ struct PowerMonitorTests {
             imageFrame: imageFrame, isPreventingSleep: true) == .menu)
         #expect(StatusItemVisualStyle.hitTarget(at: indicatorPoint, buttonBounds: bounds,
             imageFrame: imageFrame, isPreventingSleep: false) == .menu)
+        // 功率保留一位小数后相同则命中缓存；隐藏数字后，任意功率读数变化也不应重绘前缀。
+        var sample = snapshot
+        sample.state = .externalPower
+        display.update(PowerPresentation(snapshot: sample, showPower: true), button: button)
+        let inputRenderCount = display.renderCount
+        sample.inputWatts = 68.21
+        display.update(PowerPresentation(snapshot: sample, showPower: true), button: button)
+        #expect(display.renderCount == inputRenderCount)
+        sample.inputWatts = 70
+        display.update(PowerPresentation(snapshot: sample, showPower: true), button: button)
+        #expect(display.renderCount == inputRenderCount + 1)
+        display.update(PowerPresentation(snapshot: sample, showPower: false), button: button)
+        let hiddenRenderCount = display.renderCount
+        for watts in [0.0, 35.7, 140.0] {
+            sample.inputWatts = watts
+            display.update(PowerPresentation(snapshot: sample, showPower: false), button: button)
+        }
+        #expect(display.renderCount == hiddenRenderCount)
         for dark in [false, true] {
             button.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             for state in [PowerState.charging, .externalPower, .battery] {
                 var sample = snapshot
                 sample.state = state
-                display.update(PowerPresentation(snapshot: sample, metric: .watts), button: button)
+                display.update(PowerPresentation(snapshot: sample, showPower: true), button: button)
                 animator.isPreventingSleep = true
                 button.image = animator.image(at: 0, isDark: dark, reduceMotion: true)
                 button.setFrameSize(NSSize(width: try #require(button.cell).cellSize.width, height: 24))
@@ -151,7 +255,7 @@ struct PowerMonitorTests {
         for state in [PowerState.externalPower, .charging, .battery] {
             var snapshot = PowerSnapshot.decode(registry: Self.registry, source: [:])
             snapshot.state = state
-            display.update(PowerPresentation(snapshot: snapshot, metric: .watts), button: button)
+            display.update(PowerPresentation(snapshot: snapshot, showPower: true), button: button)
             try await Task.sleep(for: .milliseconds(40))
             try verifyBadgeCenter(in: button, state: state)
             // 系统会把 NSStatusBarButton 高度恢复为菜单栏高度，其他尺寸用原生 NSButton 承载同一附件。
@@ -214,7 +318,7 @@ struct PowerMonitorTests {
             item.target = receiver
             menu.addItem(item)
         }
-        let popover = PowerPopoverController(menu: menu, metric: .watts)
+        let popover = PowerPopoverController(menu: menu, showPower: true)
         let controller = popover.content
         let window = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 490, height: 450),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -223,7 +327,21 @@ struct PowerMonitorTests {
         window.setContentSize(NSSize(width: 490, height: 450))
         window.appearance = NSAppearance(named: .aqua)
         defer { window.close() }
-        let buttons = descendants(controller.view).compactMap { $0 as? NSButton }.filter { !($0 is NSPopUpButton) }
+        let checkbox = try #require(descendants(controller.info).compactMap { $0 as? NSButton }.first)
+        #expect(checkbox.title == "功率")
+        #expect(checkbox.state == .on)
+        #expect(checkbox.accessibilityLabel() == "菜单栏显示功率")
+        var selections: [Bool] = []
+        popover.onShowPowerChange = { selections.append($0) }
+        checkbox.performClick(nil)
+        #expect(checkbox.state == .off)
+        checkbox.performClick(nil)
+        #expect(checkbox.state == .on)
+        #expect(selections == [false, true])
+        let restored = PowerInfoView(showPower: false)
+        #expect(descendants(restored).compactMap { $0 as? NSButton }.first?.state == .off)
+        #expect(descendants(controller.info).allSatisfy { !($0 is NSPopUpButton) })
+        let buttons = descendants(controller.view).compactMap { $0 as? NSButton }.filter { $0 !== checkbox }
         #expect(buttons.count == titles.count)
         try #require(buttons.first).performClick(nil)
         try await Task.sleep(for: .milliseconds(20))
@@ -233,7 +351,7 @@ struct PowerMonitorTests {
             raw["IsCharging"] = state == .charging
             raw["ExternalConnected"] = state != .battery
             let snapshot = PowerSnapshot.decode(registry: raw, source: [:])
-            controller.info.update(snapshot: snapshot, presentation: PowerPresentation(snapshot: snapshot, metric: .watts))
+            controller.info.update(snapshot: snapshot, presentation: PowerPresentation(snapshot: snapshot, showPower: true))
             controller.view.layoutSubtreeIfNeeded()
             #expect(controller.info.frame.width == 220)
             #expect(buttons.allSatisfy { $0.frame.width > 200 && $0.alignmentRect(forFrame: $0.frame).height == 29 },
@@ -247,9 +365,8 @@ struct PowerMonitorTests {
         controller.focusCommand(at: titles.count - 1)
         let lastButton = try #require(buttons.last)
         #expect(lastButton.visibleRect.height == lastButton.bounds.height)
-        let picker = try #require(descendants(controller.info).compactMap { $0 as? NSPopUpButton }.first)
-        picker.scrollToVisible(picker.bounds)
-        #expect(picker.visibleRect.contains(picker.bounds))
+        checkbox.scrollToVisible(checkbox.bounds)
+        #expect(checkbox.visibleRect.contains(checkbox.bounds))
         try export(controller.view, name: "power-compact")
     }
 

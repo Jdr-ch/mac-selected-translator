@@ -16,12 +16,14 @@ enum PowerState: String, Sendable {
     }
 }
 
-/// 仅持久化菜单栏的显示偏好，不修改系统充电策略。
-enum PowerDisplayMetric: String, CaseIterable {
-    case watts, amperes
-    static let defaultsKey = "powerMonitor.displayMetric"
+/// 功率开关独立持久化；旧版功率／电流选择不影响新版默认开启行为。
+enum PowerDisplayPreference {
+    static let defaultsKey = "powerMonitor.showPower"
 
-    var title: String { self == .watts ? "充电功率" : "充电电流" }
+    /// 首次使用默认勾选，已保存的关闭选择在下次启动时继续生效。
+    static func isPowerShown(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: defaultsKey) as? Bool ?? true
+    }
 }
 
 /// 同次原生采集的电源快照；电气值统一为 V/A/W，缺失数据保持 nil。
@@ -160,7 +162,7 @@ struct PowerPresentation: Equatable {
     let showAdapter: Bool
     let showBattery: Bool
 
-    init(snapshot: PowerSnapshot, metric: PowerDisplayMetric) {
+    init(snapshot: PowerSnapshot, showPower: Bool) {
         state = snapshot.state
         percent = Self.format(snapshot.batteryPercent, decimals: 0, unit: "%")
         showAdapter = snapshot.externalConnected == true
@@ -173,12 +175,19 @@ struct PowerPresentation: Equatable {
         inputWatts = Self.format(snapshot.inputWatts, decimals: 1, unit: " W")
         batteryVoltage = Self.format(snapshot.batteryVoltage, decimals: 2, unit: " V")
         chargingWatts = Self.format(snapshot.estimatedChargingWatts, decimals: 1, unit: " W", estimated: true)
-        if snapshot.state == .charging {
-            let current = snapshot.batteryCurrent.flatMap { $0 >= 0 ? $0 : nil }
-            menuValue = metric == .watts ? chargingWatts : Self.format(current, decimals: 2, unit: " A")
-        } else {
-            menuValue = ""
+        // 仅从共享快照选择功率来源；使用电池时没有外部输入，不显示旧读数或放电功率。
+        switch (showPower, snapshot.state) {
+        case (true, .charging): menuValue = chargingWatts
+        case (true, .externalPower): menuValue = inputWatts
+        default: menuValue = ""
         }
+    }
+
+    /// 提示与无障碍文案跟随实际数值来源；关闭或使用电池时不宣读隐藏的功率。
+    var menuPowerDescription: String? {
+        guard !menuValue.isEmpty else { return nil }
+        let label = state == .charging ? "电池充电功率" : "系统输入功率"
+        return "\(label) \(menuValue)"
     }
 
     /// 固定小数位和单位；估算功率加约等号，缺失时显示破折号。

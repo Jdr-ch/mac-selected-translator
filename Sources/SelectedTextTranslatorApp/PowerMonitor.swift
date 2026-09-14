@@ -1,9 +1,13 @@
 import AppKit
+import IOKit
 import IOKit.ps
 
 /// 唯一的电源采集调度器；菜单栏与面板消费同一快照，始终最多一个后台读取任务。
 @MainActor
 final class PowerMonitor {
+    /// IOPM.h 的 kIOPMMessageBatteryStatusHasChanged；Swift 不能导入其宏表达式。
+    /// 该私有消息表示 IORegistry 已有新电池数据，不保证所有机型支持，轮询始终保留。
+    nonisolated static let batteryStatusChangedMessage: UInt32 = 0xe0024100
     var onChange: ((PowerSnapshot) -> Void)?
     private(set) var snapshot = PowerSnapshot()
     private(set) var sampleCount = 0
@@ -12,6 +16,10 @@ final class PowerMonitor {
     private let queue = DispatchQueue(label: "com.local.selected-text-translator.power", qos: .utility)
     private var timer: Timer?
     private var source: CFRunLoopSource?
+    /// 设备通知仅在监控运行且屏幕解锁、系统唤醒时持有；暂停后释放，恢复时重新订阅。
+    private var batteryNotificationPort: IONotificationPortRef?
+    private var batteryNotification: io_object_t = IO_OBJECT_NULL
+    private var observesSystem = false
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var isRunning = false
     private var isReading = false
@@ -21,6 +29,9 @@ final class PowerMonitor {
     private var sleeping = false
     private var locked = false
 
+    /// 表示设备通知订阅成功；失败时仍由原有 IOPS 通知与周期读取更新数据。
+    var isObservingBatteryUpdates: Bool { batteryNotification != IO_OBJECT_NULL }
+
     init(reader: @escaping @Sendable () -> PowerSnapshot = { SystemPowerReader.read() }) {
         read = reader
     }
@@ -29,6 +40,7 @@ final class PowerMonitor {
     func start(observeSystem: Bool = true) {
         guard !isRunning else { return }
         isRunning = true
+        observesSystem = observeSystem
         generation += 1
         if observeSystem {
             source = IOPSNotificationCreateRunLoopSource({ context in
@@ -42,6 +54,7 @@ final class PowerMonitor {
             observe(DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked")) { $0.setSuspended(locked: true) }
             observe(DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsUnlocked")) { $0.setSuspended(locked: false) }
         }
+        updateBatteryNotifications()
         updateTimer()
         refresh()
     }
@@ -49,7 +62,9 @@ final class PowerMonitor {
     /// 停止后丢弃在途读取的结果；解除通知与计时器，避免退出后继续回调界面。
     func stop() {
         isRunning = false
+        observesSystem = false
         generation += 1
+        stopBatteryNotifications()
         timer?.invalidate()
         timer = nil
         interval = nil
@@ -73,8 +88,54 @@ final class PowerMonitor {
     func setSuspended(sleeping: Bool? = nil, locked: Bool? = nil) {
         if let sleeping { self.sleeping = sleeping }
         if let locked { self.locked = locked }
+        updateBatteryNotifications()
         updateTimer()
         if !self.sleeping && !self.locked { refresh() }
+    }
+
+    /// 只接受电池数据更新消息；沿用同一后台队列和合并机制，暂停或停止后不会查询硬件。
+    func batteryServiceDidSend(_ messageType: UInt32) {
+        guard messageType == Self.batteryStatusChangedMessage else { return }
+        refresh()
+    }
+
+    /// 按生命周期订阅 AppleSmartBattery；失败时不重试轮询注册，不影响原有采样兜底。
+    private func updateBatteryNotifications() {
+        guard isRunning, observesSystem, !sleeping, !locked else {
+            stopBatteryNotifications()
+            return
+        }
+        guard batteryNotificationPort == nil else { return }
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != IO_OBJECT_NULL else { return }
+        defer { IOObjectRelease(service) }
+        guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        var notification: io_object_t = IO_OBJECT_NULL
+        let result = IOServiceAddInterestNotification(port, service, kIOGeneralInterest, { context, _, messageType, _ in
+            guard messageType == PowerMonitor.batteryStatusChangedMessage, let context else { return }
+            let monitor = Unmanaged<PowerMonitor>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor [weak monitor] in monitor?.batteryServiceDidSend(messageType) }
+        }, Unmanaged.passUnretained(self).toOpaque(), &notification)
+        guard result == KERN_SUCCESS, let notificationSource = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() else {
+            if notification != IO_OBJECT_NULL { IOObjectRelease(notification) }
+            IONotificationPortDestroy(port)
+            return
+        }
+        batteryNotificationPort = port
+        batteryNotification = notification
+        CFRunLoopAddSource(CFRunLoopGetMain(), notificationSource, .commonModes)
+    }
+
+    /// 先移除主线程事件源再释放句柄；与注册配对，避免暂停期间新增设备通知唤醒。
+    private func stopBatteryNotifications() {
+        guard let port = batteryNotificationPort else { return }
+        if let notificationSource = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), notificationSource, .commonModes)
+        }
+        if batteryNotification != IO_OBJECT_NULL { IOObjectRelease(batteryNotification) }
+        batteryNotification = IO_OBJECT_NULL
+        IONotificationPortDestroy(port)
+        batteryNotificationPort = nil
     }
 
     /// 通知和定时请求合并为最多一次待刷新；IOKit 与解析全部在后台队列执行。

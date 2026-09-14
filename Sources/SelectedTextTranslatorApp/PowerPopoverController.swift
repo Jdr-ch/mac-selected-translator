@@ -4,15 +4,15 @@ import AppKit
 @MainActor
 final class PowerPopoverController: NSObject, NSPopoverDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
-    var onMetricChange: ((PowerDisplayMetric) -> Void)?
+    var onShowPowerChange: ((Bool) -> Void)?
     private let popover = NSPopover()
     let content: PowerPopoverContentController
     private weak var statusButton: NSStatusBarButton?
 
     var isShown: Bool { popover.isShown }
 
-    init(menu: NSMenu, metric: PowerDisplayMetric) {
-        content = PowerPopoverContentController(menu: menu, metric: metric)
+    init(menu: NSMenu, showPower: Bool) {
+        content = PowerPopoverContentController(menu: menu, showPower: showPower)
         super.init()
         popover.behavior = .transient
         popover.animates = false
@@ -27,7 +27,7 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
                 if let action = item.action { NSApp.sendAction(action, to: item.target, from: item) }
             }
         }
-        content.info.onMetricChange = { [weak self] metric in self?.onMetricChange?(metric) }
+        content.info.onShowPowerChange = { [weak self] showPower in self?.onShowPowerChange?(showPower) }
     }
 
     /// 跟随被点击的原生按钮定位；再次点击关闭，展开时限制高度并立即启用面板采样。
@@ -70,9 +70,9 @@ final class PowerPopoverContentController: NSViewController {
     private var commandButtons: [PowerCommandButton] = []
     private var viewportHeight: NSLayoutConstraint?
 
-    init(menu: NSMenu, metric: PowerDisplayMetric) {
+    init(menu: NSMenu, showPower: Bool) {
         self.commands = menu
-        info = PowerInfoView(metric: metric)
+        info = PowerInfoView(showPower: showPower)
         super.init(nibName: nil, bundle: nil)
         _ = view
     }
@@ -164,7 +164,7 @@ final class PowerPopoverContentController: NSViewController {
 
     func setViewportHeight(_ height: CGFloat) { viewportHeight?.constant = height }
 
-    /// 翻转裁剪坐标让短内容贴顶；两栏独立滚动，小屏仍能访问单位选择和退出命令。
+    /// 翻转裁剪坐标让短内容贴顶；两栏独立滚动，小屏仍能访问功率开关和退出命令。
     private static func topAlignedScrollView() -> NSScrollView {
         let scroll = NSScrollView()
         scroll.contentView = PowerTopClipView()
@@ -178,7 +178,7 @@ final class PowerPopoverContentController: NSViewController {
     /// 休眠或模型改变时复用原菜单对象更新标题，不重新构造面板或丢失键盘焦点。
     func refreshCommands() { commandButtons.forEach { $0.refreshTitle() } }
 
-    /// 上下方向键循环命令，原生 Tab 仍可进入左栏的单位选择框。
+    /// 上下方向键循环命令，原生 Tab 仍可进入左栏的功率复选框。
     func focusCommand(at index: Int) {
         guard !commandButtons.isEmpty else { return }
         let normalized = (index + commandButtons.count) % commandButtons.count

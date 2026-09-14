@@ -3,7 +3,7 @@ import AppKit
 /// 左栏只显示共享快照，不自行读取电源；通过格式化结果去重标签更新。
 @MainActor
 final class PowerInfoView: NSVisualEffectView {
-    var onMetricChange: ((PowerDisplayMetric) -> Void)?
+    var onShowPowerChange: ((Bool) -> Void)?
     private let percentage = NSTextField(labelWithString: "—")
     private let status = NSTextField(labelWithString: "电源状态暂不可用")
     private let adapter = NSTextField(wrappingLabelWithString: "暂不可用")
@@ -18,11 +18,11 @@ final class PowerInfoView: NSVisualEffectView {
     private let inputRows = NSStackView()
     private var batteryRow: NSView!
     private var chargingRow: NSView!
-    private let metricPicker = NSPopUpButton()
+    private let powerCheckbox = NSButton(checkboxWithTitle: "功率", target: nil, action: nil)
     private var lastPresentation: PowerPresentation?
     private var currentState = PowerState.unavailable
 
-    init(metric: PowerDisplayMetric) {
+    init(showPower: Bool) {
         super.init(frame: .zero)
         material = .sidebar
         blendingMode = .withinWindow
@@ -89,13 +89,12 @@ final class PowerInfoView: NSVisualEffectView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
         stack.addArrangedSubview(spacer)
-        metricPicker.addItems(withTitles: PowerDisplayMetric.allCases.map(\.title))
-        metricPicker.selectItem(at: PowerDisplayMetric.allCases.firstIndex(of: metric) ?? 0)
-        metricPicker.font = .systemFont(ofSize: 11)
-        metricPicker.target = self
-        metricPicker.action = #selector(metricChanged)
-        metricPicker.setAccessibilityLabel("菜单栏显示")
-        let options = NSStackView(views: [Self.secondaryLabel("菜单栏显示"), NSView(), metricPicker])
+        powerCheckbox.state = showPower ? .on : .off
+        powerCheckbox.font = .systemFont(ofSize: 11)
+        powerCheckbox.target = self
+        powerCheckbox.action = #selector(powerVisibilityChanged)
+        powerCheckbox.setAccessibilityLabel("菜单栏显示功率")
+        let options = NSStackView(views: [Self.secondaryLabel("菜单栏显示"), NSView(), powerCheckbox])
         stack.addArrangedSubview(options)
         options.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
@@ -137,10 +136,9 @@ final class PowerInfoView: NSVisualEffectView {
         level.fillColor = status.textColor ?? .systemBlue
     }
 
-    @objc private func metricChanged() {
-        let index = metricPicker.indexOfSelectedItem
-        guard PowerDisplayMetric.allCases.indices.contains(index) else { return }
-        onMetricChange?(PowerDisplayMetric.allCases[index])
+    /// 原生勾选只通知展示偏好变化，由上层复用快照更新菜单栏，不触发采集。
+    @objc private func powerVisibilityChanged() {
+        onShowPowerChange?(powerCheckbox.state == .on)
     }
 
     private static func secondaryLabel(_ title: String) -> NSTextField {

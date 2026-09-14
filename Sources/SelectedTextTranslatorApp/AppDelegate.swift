@@ -33,8 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let powerMonitor = PowerMonitor()
     private let powerStatusDisplay = PowerStatusDisplay()
     private var powerPopover: PowerPopoverController?
-    private var powerMetric = PowerDisplayMetric(rawValue: UserDefaults.standard.string(forKey: PowerDisplayMetric.defaultsKey) ?? "") ?? .watts
-    private var powerPresentation = PowerPresentation(snapshot: PowerSnapshot(), metric: .watts)
+    private var showMenuBarPower = PowerDisplayPreference.isPowerShown()
+    private var powerPresentation = PowerPresentation(snapshot: PowerSnapshot(), showPower: true)
     /// 鼠标按下时先捕获选区来源，避免弹出面板改变前台应用后再读取。
     private var statusSourceCaptured = false
     /// Drives the faster icon rhythm for the lifetime of one translation request.
@@ -150,12 +150,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         statusItem = item
-        powerPopover = PowerPopoverController(menu: menu, metric: powerMetric)
+        powerPopover = PowerPopoverController(menu: menu, showPower: showMenuBarPower)
         powerPopover?.onVisibilityChange = { [weak self] visible in self?.powerMonitor.setPanelVisible(visible) }
-        powerPopover?.onMetricChange = { [weak self] metric in
+        powerPopover?.onShowPowerChange = { [weak self] showPower in
             guard let self else { return }
-            self.powerMetric = metric
-            UserDefaults.standard.set(metric.rawValue, forKey: PowerDisplayMetric.defaultsKey)
+            self.showMenuBarPower = showPower
+            UserDefaults.standard.set(showPower, forKey: PowerDisplayPreference.defaultsKey)
+            // 切换偏好只重用已有读数，避免点击复选框增加硬件读取或重建采样计时器。
             self.updatePowerSnapshot(self.powerMonitor.snapshot)
         }
         powerMonitor.onChange = { [weak self] snapshot in self?.updatePowerSnapshot(snapshot) }
@@ -239,9 +240,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updatePowerStatusButton()
     }
 
-    /// 数值转换只发生在新快照或单位切换时，菜单栏与左栏共享同一份显示结果。
+    /// 数值转换只发生在新快照或功率开关切换时，菜单栏与左栏共享同一份显示结果。
     private func updatePowerSnapshot(_ snapshot: PowerSnapshot) {
-        powerPresentation = PowerPresentation(snapshot: snapshot, metric: powerMetric)
+        powerPresentation = PowerPresentation(snapshot: snapshot, showPower: showMenuBarPower)
         updatePowerStatusButton()
         powerPopover?.update(snapshot: snapshot, presentation: powerPresentation)
     }
@@ -251,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
         powerStatusDisplay.update(powerPresentation, button: button)
         var description = "划词翻译；\(powerPresentation.state.title)，\(powerPresentation.percent)"
-        if !powerPresentation.menuValue.isEmpty { description += "；电池充入 \(powerPresentation.menuValue)" }
+        if let power = powerPresentation.menuPowerDescription { description += "；\(power)" }
         if sleepPreventionController.isPreventingSleep { description += "；禁止休眠中" }
         button.toolTip = description + "；按 Option+Tab"
         button.setAccessibilityLabel(description)
