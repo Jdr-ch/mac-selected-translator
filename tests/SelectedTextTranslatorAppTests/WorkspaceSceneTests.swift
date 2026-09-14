@@ -20,11 +20,17 @@ struct WorkspaceSceneTests {
         #expect(smaller.contains(WorkspaceGeometry.absolute(relative, in: smaller)))
     }
 
-    @Test func desktopUUIDWinsOverRecycledNumericID() throws {
+    @Test func desktopNameSurvivesDeletionAndRecreation() throws {
         let saved = desktop()
         let afterRestart = desktop(spaceID: 900)
         #expect(try WorkspaceGeometry.resolve(saved, in: [afterRestart]).spaceID == 900)
-        #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [desktop(id: "other")]) }
+        #expect(try WorkspaceGeometry.resolve(saved, in: [desktop(id: "other")]).id == "other")
+        var movedName = saved
+        movedName.ordinal = 4
+        #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [movedName]) }
+        var anotherDisplay = saved
+        anotherDisplay.displayID = "display-b"
+        #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [anotherDisplay]) }
     }
 
     @Test func incompleteSavePreservesExistingScene() throws {

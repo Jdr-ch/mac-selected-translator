@@ -1,257 +1,279 @@
 import AppKit
-import ApplicationServices
 
-/// 一个工作场景的编辑与执行状态；窗口控制器只展示此状态，不复制采集或恢复流程。
+/// 桌面行只显示当前阶段，不将窗口完成数量当作真实进度百分比。
+struct WorkspaceDesktopActivity {
+    var message: String
+    var running = false
+    var failed = false
+}
+
+/// 管理桌面选择、独立草稿和执行状态；窗口展示层不直接修改保存模板。
 @MainActor
 final class WorkspaceSceneController {
     let catalog = WorkspaceWindowCatalog()
     let bridge = WorkspaceChromeBridge()
-    let store = WorkspaceSceneStore()
-    var scene: WorkspaceScene?
-    var outcomes: [WorkspaceOutcome] = []
-    var busy = false
-    /// 草稿修改后必须显式保存，恢复操作只接受用户已确认的模板。
-    var isDirty = false
-    var status = "先采集桌面 3、4、5，检查清单后保存。"
+    let store: WorkspaceSceneStore
+    var library = WorkspaceSceneDrafts()
+    private(set) var currentDesktops: [WorkspaceDesktop] = []
+    /// 以显示器与桌面名称保存本次面板选择；首次加载默认勾选全部已保存桌面。
+    var selectedKeys: Set<String> = []
+    private(set) var activities: [String: WorkspaceDesktopActivity] = [:]
+    private(set) var outcomes: [WorkspaceOutcome] = []
+    /// 仅恢复失败进入重试范围，采集和保存错误不能被误当作可重试的恢复结果。
+    private var retryDesktopKeys: Set<String> = []
+    private(set) var busy = false
+    var status = "勾选需要的桌面，采集并检查窗口后单独保存。"
     var onChange: (() -> Void)?
 
-    /// 打开管理面板时加载已有模板，读取失败不覆盖内存中的场景。
+    init(store: WorkspaceSceneStore = WorkspaceSceneStore()) { self.store = store }
+
+    /// 已删除的保存桌面仍保留在清单中；新建桌面立即可选，不会改变已有勾选。
+    var desktops: [WorkspaceDesktop] {
+        var seen: Set<String> = []
+        return (currentDesktops + library.drafts.values.map(\.desktop) + (library.saved?.savedDesktops ?? []))
+            .filter { seen.insert($0.selectionKey).inserted }
+            .sorted { $0.ordinal == $1.ordinal ? $0.displayID < $1.displayID : $0.ordinal < $1.ordinal }
+    }
+
+    var savedKeys: Set<String> { Set(library.saved?.savedDesktops.map(\.selectionKey) ?? []) }
+    var failedKeys: Set<String> { retryDesktopKeys }
+
+    /// 只在首次打开时加载模板；错误不会以空场景覆盖用户已经保存的数据。
     func load() {
         do {
-            if let saved = try store.load() {
-                scene = saved
-                isDirty = false
-                status = "已保存 \(saved.windows.count) 个窗口，可直接恢复或重新采集。"
-            }
+            library.saved = try store.load()
+            selectedKeys = savedKeys
+            if let saved = library.saved { status = "已保存 \(saved.savedDesktops.count) 个桌面、\(saved.windows.count) 个窗口。" }
         } catch { status = error.localizedDescription }
+        refreshDesktops()
+    }
+
+    /// 打开面板或点击刷新时读取桌面清单，捕获用户新增或删除桌面后的名称变化。
+    func refreshDesktops() {
+        guard !busy else { return }
+        do {
+            currentDesktops = try catalog.desktop.desktops()
+            selectedKeys.formIntersection(Set(desktops.map(\.selectionKey)))
+        }
+        catch { status = error.localizedDescription }
         onChange?()
     }
 
-    /// 只采集所选普通桌面；从扩展获取完整 Chrome 窗口，再与原生空间归属关联。
-    func capture() async {
+    func activity(for desktop: WorkspaceDesktop) -> WorkspaceDesktopActivity {
+        let key = desktop.selectionKey
+        if let activity = activities[key] { return activity }
+        if library.drafts[key] != nil { return WorkspaceDesktopActivity(message: "待保存") }
+        if savedKeys.contains(key) {
+            return WorkspaceDesktopActivity(message: currentDesktops.contains(where: { $0.selectionKey == key }) ? "已保存" : "恢复时补建／重绑")
+        }
+        return WorkspaceDesktopActivity(message: "尚未采集")
+    }
+
+    func canCapture(_ key: String) -> Bool { !busy && currentDesktops.contains { $0.selectionKey == key } }
+    func canSave(_ key: String) -> Bool { !busy && library.drafts[key] != nil }
+    func canRestore(_ key: String) -> Bool { !busy && savedKeys.contains(key) }
+
+    /// 一次读取跨桌面窗口，结果按所选桌面分别更新草稿；其他桌面的草稿和模板保持原样。
+    func capture(keys: Set<String>? = nil) async {
         guard !busy else { return }
+        let requested = keys ?? selectedKeys
+        guard !requested.isEmpty else { return }
         busy = true
-        status = "正在采集桌面 3、4、5…"
+        for key in requested { activities[key] = WorkspaceDesktopActivity(message: "采集中…", running: true) }
+        status = "正在采集所选桌面的项目与群组…"
         onChange?()
         defer { busy = false; onChange?() }
         do {
-            let desktops = try catalog.desktop.desktops().filter { [3, 4, 5].contains($0.ordinal) }
-            guard desktops.count == 3 else { throw WorkspaceError.message("当前没有完整的桌面 3、4、5，请恢复桌面配置后采集。") }
-            let profiles = bridge.connectedProfiles()
-            guard profiles.count == 1, let profile = profiles.first else {
-                throw WorkspaceError.message(profiles.isEmpty ? "请先在 Chrome 当前用户资料中启用工作场景助手。" : "有多个 Chrome 资料连接，请只在要保存的资料中启用扩展。")
+            currentDesktops = try catalog.desktop.desktops()
+            let targets = currentDesktops.filter { requested.contains($0.selectionKey) }
+            let targetKeys = Set(targets.map(\.selectionKey))
+            for key in requested.subtracting(targetKeys) {
+                activities[key] = WorkspaceDesktopActivity(message: "桌面不存在，请先新建或重新绑定", failed: true)
             }
-            let chromeWindows = try await bridge.capture(profile: profile)
-            // Chrome 快照包含全部窗口，匹配时也使用全部桌面，避免把其他桌面同标题窗口误配到目标桌面。
+            guard !targets.isEmpty else { status = "所选桌面不存在，请刷新桌面清单。"; return }
             let nativeWindows = try await catalog.windows()
+            let unresolved = catalog.unresolved
+            let spaces = Set(targets.map(\.spaceID))
+            let hasChrome = nativeWindows.contains { $0.bundleID == "com.google.Chrome" && !spaces.isDisjoint(with: $0.spaceIDs) }
+            var profile = ""
+            var directory = ""
+            var chromeError: String?
             var chromeByNative: [UInt32: ChromeWindowSnapshot] = [:]
-            for var chrome in chromeWindows {
-                guard let native = try? catalog.chromeWindow(chrome, among: nativeWindows) else { continue }
-                for index in chrome.groups.indices {
-                    chrome.groups[index].saved = catalog.savedGroupButton(chrome.groups[index].title, windows: [native]) != nil
+            if hasChrome {
+                do {
+                    let profiles = bridge.connectedProfiles()
+                    guard profiles.count == 1, let connected = profiles.first else {
+                        throw WorkspaceError.message("请只在要保存的 Chrome 资料中启用工作场景助手，然后重新采集。")
+                    }
+                    profile = connected
+                    directory = try bridge.installedProfileDirectory()
+                    let snapshots = try await bridge.capture(profile: profile)
+                    // Chrome 匹配必须使用所有桌面的候选，不能因只勾选一个桌面而错误匹配同名窗口。
+                    for var chrome in snapshots {
+                        guard let native = try? catalog.chromeWindow(chrome, among: nativeWindows) else { continue }
+                        for index in chrome.groups.indices {
+                            chrome.groups[index].saved = catalog.savedGroupButton(chrome.groups[index].title, windows: [native]) != nil
+                        }
+                        chromeByNative[native.id] = chrome
+                    }
+                } catch { chromeError = error.localizedDescription }
+            }
+            for desktop in targets {
+                var entries: [WorkspaceWindow] = []
+                for native in nativeWindows where native.spaceIDs == [desktop.spaceID] {
+                    var entry = WorkspaceWindow(bundleID: native.bundleID, appName: native.appName, title: native.title,
+                        desktop: desktop, relativeFrame: WorkspaceGeometry.relative(native.frame, in: desktop.screenFrame))
+                    if native.bundleID == "com.jetbrains.WebStorm" {
+                        entry.projectPath = catalog.projectPath(for: native)
+                        if entry.projectPath == nil { entry.issues.append("需要选择 WebStorm 项目文件夹。") }
+                    } else if native.bundleID == "com.google.Chrome" {
+                        entry.chrome = chromeByNative[native.id]
+                        if entry.chrome == nil { entry.issues.append(chromeError ?? "无法匹配 Chrome 窗口，请重新采集。") }
+                        if entry.chrome?.groups.contains(where: { $0.title.isEmpty }) == true {
+                            entry.issues.append("请为未命名群组命名后重新采集。")
+                        }
+                    }
+                    entries.append(entry)
                 }
-                chromeByNative[native.id] = chrome
-            }
-            var entries: [WorkspaceWindow] = []
-            for native in nativeWindows {
-                let matches = desktops.filter { native.spaceIDs.contains($0.spaceID) }
-                guard matches.count == 1, let desktop = matches.first else { continue }
-                var entry = WorkspaceWindow(bundleID: native.bundleID, appName: native.appName, title: native.title,
-                    desktop: desktop, relativeFrame: WorkspaceGeometry.relative(native.frame, in: desktop.screenFrame))
-                if native.bundleID == "com.jetbrains.WebStorm" {
-                    entry.projectPath = catalog.projectPath(for: native)
-                    if entry.projectPath == nil { entry.issues.append("需要选择 WebStorm 项目文件夹。") }
-                } else if native.bundleID == "com.google.Chrome" {
-                    entry.chrome = chromeByNative[native.id]
-                    if entry.chrome == nil { entry.issues.append("无法匹配当前资料中的 Chrome 窗口，请检查资料或重新采集。") }
-                    if entry.chrome?.groups.contains(where: { $0.title.isEmpty }) == true { entry.issues.append("请为未命名群组命名后重新采集。") }
+                for surface in unresolved where surface.spaceIDs == [desktop.spaceID] {
+                    entries.append(WorkspaceWindow(bundleID: surface.bundleID, appName: surface.appName, title: surface.title,
+                        desktop: desktop, relativeFrame: WorkspaceGeometry.relative(surface.frame, in: desktop.screenFrame),
+                        issues: ["该窗口暂未读取完成，请再次采集；仍失败时检查应用是否有待处理弹窗。"]))
                 }
-                entries.append(entry)
+                let key = desktop.selectionKey
+                library.drafts[key] = WorkspaceDesktopDraft(desktop: desktop, windows: entries,
+                    profileToken: profile, profileDirectory: directory)
+                let incomplete = entries.contains { !$0.issues.isEmpty }
+                activities[key] = WorkspaceDesktopActivity(message: incomplete ? "有待补充条目" : "已采集 · 待保存", failed: incomplete)
+                let ids = Set(library.saved?.windows.filter { $0.desktop.selectionKey == key }.map(\.id) ?? [])
+                outcomes.removeAll { ids.contains($0.windowID) }
+                retryDesktopKeys.remove(key)
             }
-            // 系统已确认存在但尚未响应 AX 的窗口仍显示在预览中，不静默保存一个桌面子集。
-            for surface in catalog.unresolved {
-                let matches = desktops.filter { surface.spaceIDs.contains($0.spaceID) }
-                guard matches.count == 1, let desktop = matches.first else { continue }
-                entries.append(WorkspaceWindow(bundleID: surface.bundleID, appName: surface.appName, title: surface.title,
-                    desktop: desktop, relativeFrame: WorkspaceGeometry.relative(surface.frame, in: desktop.screenFrame),
-                    issues: ["该桌面窗口暂未读取完成，请再次采集；仍失败时检查应用是否有待处理弹窗。"]))
-            }
-            guard !entries.isEmpty else { throw WorkspaceError.message("目标桌面没有可采集的普通窗口。") }
-            let directory = try bridge.installedProfileDirectory()
-            scene = WorkspaceScene(profileToken: profile, chromeProfileDirectory: directory,
-                                   windows: entries.sorted { $0.desktop.ordinal < $1.desktop.ordinal })
-            isDirty = true
-            outcomes = []
-            let counts = desktops.map { desktop in "\(desktop.label)：\(entries.filter { $0.desktop.id == desktop.id }.count)" }.joined(separator: "，")
-            status = "已采集 \(entries.count) 个窗口（\(counts)）。请检查清单后保存。"
-        } catch { status = error.localizedDescription }
+            status = "已采集 \(targets.count) 个桌面。展开核对后，可逐桌面保存或保存所选。"
+        } catch {
+            for key in requested { activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true) }
+            status = error.localizedDescription
+        }
     }
 
-    /// 保存只接受完整预览；用户修正项目和桌面后统一持久化，避免半完成模板覆盖旧模板。
-    func save() {
-        guard !busy, var scene else { return }
-        do {
-            scene.savedAt = Date()
-            try store.save(scene)
-            self.scene = scene
-            isDirty = false
-            status = "工作场景已保存，共 \(scene.windows.count) 个窗口。"
-        } catch { status = error.localizedDescription }
+    /// 所选桌面各自保存；某桌面有未补齐窗口时不阻止其他完整桌面保存。
+    func save(keys: Set<String>? = nil) {
+        guard !busy else { return }
+        let requested = keys ?? selectedKeys
+        var savedCount = 0
+        var failedCount = 0
+        for key in requested.sorted() where library.drafts[key] != nil {
+            do {
+                try library.save(key, to: store)
+                activities[key] = WorkspaceDesktopActivity(message: "已保存")
+                savedCount += 1
+            } catch {
+                activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true)
+                failedCount += 1
+            }
+        }
+        status = "已保存 \(savedCount) 个桌面" + (failedCount > 0 ? "，\(failedCount) 个桌面需要处理。" : "。")
         onChange?()
     }
 
-    /// 仅重试失败条目时使用上次结果；运行中禁止再次提交，结束后总会释放 busy。
-    func restore(failedOnly: Bool = false) async {
-        guard !busy else { return }
-        guard !isDirty else { status = "请先保存当前场景修改，再恢复窗口。"; onChange?(); return }
-        if scene == nil { load() }
-        guard let scene else { status = "请先保存工作场景。"; onChange?(); return }
+    /// 只恢复勾选桌面的保存版本；集中补建后并发启动窗口，保留未勾选桌面的结果与草稿。
+    func restore(keys: Set<String>? = nil, failedOnly: Bool = false) async {
+        guard !busy, let scene = library.saved else { return }
+        let requested = (keys ?? selectedKeys).intersection(savedKeys)
+        let selected = failedOnly ? requested.intersection(failedKeys) : requested
+        guard !selected.isEmpty else { return }
         let failedIDs = Set(outcomes.filter { $0.error != nil }.map(\.windowID))
-        let entries = scene.windows.filter { !failedOnly || failedIDs.contains($0.id) }
-        guard !entries.isEmpty else { return }
+        let entries = library.restorationEntries(for: selected, failedIDs: failedOnly ? failedIDs : nil)
+        let targets = scene.savedDesktops.filter { selected.contains($0.selectionKey) }
+        let entryIDs = Set(entries.map(\.id))
+        outcomes.removeAll { entryIDs.contains($0.windowID) }
         busy = true
-        outcomes.removeAll { outcome in entries.contains(where: { $0.id == outcome.windowID }) }
+        for key in selected { activities[key] = WorkspaceDesktopActivity(message: "准备桌面…", running: true) }
+        status = "正在准备所选桌面…"
         onChange?()
         defer { busy = false; onChange?() }
-        let chromeWindowIDs = scene.windows.filter { $0.chrome != nil }.map(\.id)
-        // 同次恢复中，一个原生窗口只能对应一个模板条目；防止后续条目覆盖已恢复布局。
-        var assignedWindowIDs: Set<UInt32> = []
-        for (index, entry) in entries.enumerated() {
-            status = "正在恢复 \(index + 1)/\(entries.count)：\(entry.label)"
-            onChange?()
-            do {
-                guard entry.issues.isEmpty else { throw WorkspaceError.message(entry.issues.joined(separator: "；")) }
-                let target = try WorkspaceGeometry.resolve(entry.desktop, in: catalog.desktop.desktops())
-                let native: WorkspaceNativeWindow
-                if entry.chrome != nil {
-                    native = try await restoreChrome(entry, profile: scene.profileToken,
-                        profileDirectory: scene.chromeProfileDirectory, sceneWindowIDs: chromeWindowIDs)
-                } else {
-                    native = try await restoreApplication(entry)
+        let creation = WorkspaceDesktopCreation(desktop: catalog.desktop)
+        let prepared = await WorkspaceDesktopPreparation.prepare(targets, read: { try self.catalog.desktop.desktops() },
+            add: { try await creation.add(on: $0) }, progress: { displayID in
+                for desktop in targets where desktop.displayID == displayID {
+                    self.activities[desktop.selectionKey] = WorkspaceDesktopActivity(message: "正在补建桌面…", running: true)
                 }
-                guard assignedWindowIDs.insert(native.id).inserted else {
-                    throw WorkspaceError.message("该窗口已被本次其他场景条目使用，无法分别恢复，请检查窗口分配后重试。")
-                }
-                let frame = WorkspaceGeometry.absolute(entry.relativeFrame, in: target.screenFrame)
-                // 先移入目标显示器，再指定该显示器的桌面，避免跨显示器恢复使用错误空间。
-                try catalog.applyFrame(frame, to: native)
-                try await catalog.desktop.move(native.id, to: target)
-                try catalog.applyFrame(frame, to: native)
-                // WindowServer 更新有短暂延迟；只有位置、尺寸和唯一桌面归属都吻合才报告成功。
-                try await waitFor(timeout: 5, failure: "\(entry.label)的桌面或位置验证超时，请重试该条目。") { () async throws -> Bool? in
-                    guard try self.catalog.desktop.spaces(for: native.id) == [target.spaceID],
-                          let current = WorkspaceWindowCatalog.frame(native.element),
-                          WorkspaceWindowCatalog.distance(current, frame) <= 8 else { return nil }
-                    return true
-                }
-                outcomes.append(WorkspaceOutcome(windowID: entry.id, label: entry.label))
-            } catch {
-                outcomes.append(WorkspaceOutcome(windowID: entry.id, label: entry.label, error: error.localizedDescription))
-            }
-            onChange?()
-        }
-        let failed = outcomes.filter { $0.error != nil }.count
-        status = failed == 0 ? "恢复完成：\(outcomes.count) 个窗口已回到目标桌面和位置。"
-            : "已完成 \(outcomes.count - failed) 项，\(failed) 项需要处理，可重试失败项。"
-    }
-
-    /// 已保存但未打开的群组优先通过 Chrome 原生入口打开，防止创建重复的已保存群组。
-    private func restoreChrome(_ entry: WorkspaceWindow, profile savedProfile: String, profileDirectory: String,
-                               sceneWindowIDs: [String]) async throws -> WorkspaceNativeWindow {
-        guard let snapshot = entry.chrome else { throw WorkspaceError.message("Chrome 快照缺失。") }
-        let profile: String
-        if let connected = try bridge.restorationProfile(savedProfile: savedProfile, profileDirectory: profileDirectory) {
-            profile = connected
-        } else {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") else {
-                throw WorkspaceError.message("未安装 Google Chrome。")
-            }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = false
-            configuration.arguments = ["--profile-directory=\(profileDirectory)"]
-            _ = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-            // 每次观察都重新解析原资料的有效连接，避免扩展重载后永远等待旧令牌。
-            profile = try await waitFor(timeout: 20, failure: "等待 Chrome 资料（\(profileDirectory)）连接超时，请检查工作场景助手是否已启用。") {
-                try self.bridge.restorationProfile(savedProfile: savedProfile, profileDirectory: profileDirectory)
+                self.onChange?()
+            })
+        await creation.finish()
+        if let current = try? catalog.desktop.desktops() { currentDesktops = current }
+        for desktop in targets {
+            let key = desktop.selectionKey
+            if entries.contains(where: { $0.desktop.selectionKey == key }) {
+                activities[key] = WorkspaceDesktopActivity(message: "恢复中…", running: true)
+            } else {
+                do {
+                    _ = try prepared[key]?.get()
+                    activities[key] = WorkspaceDesktopActivity(message: "已恢复 · 无窗口需要打开")
+                } catch { activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true) }
             }
         }
-        let live = try await bridge.capture(profile: profile, requireIndependentWindows: true)
-        let liveNames = Set(live.flatMap(\.groups).map(\.title))
-        let nativeWindows = try await catalog.windows(bundleID: "com.google.Chrome")
-        let profileWindows = live.compactMap { try? catalog.chromeWindow($0, among: nativeWindows) }
-        var canCreate: [Int] = []
-        for group in snapshot.groups where !liveNames.contains(group.title) {
-            if let button = catalog.savedGroupButton(group.title, windows: profileWindows) {
-                guard AXUIElementPerformAction(button, kAXPressAction as CFString) == .success else {
-                    throw WorkspaceError.message("请在 Chrome 中打开已保存群组“\(group.title)”后重试。")
-                }
-                try await waitFor(timeout: 20, failure: "打开 Chrome 已保存群组“\(group.title)”超时，请在 Chrome 中打开该群组后重试。") {
-                    let windows = try await self.bridge.capture(profile: profile)
-                    return windows.flatMap(\.groups).contains(where: { $0.title == group.title }) ? true : nil
-                }
-            } else if group.saved == true {
-                throw WorkspaceError.message("未找到已保存群组“\(group.title)”入口，请在 Chrome 中打开该群组后重试。")
-            } else { canCreate.append(group.id) }
+        status = "正在并行恢复窗口…"
+        onChange?()
+        let runner = WorkspaceRestoreRunner(catalog: catalog, bridge: bridge)
+        let result = await WorkspaceRestoreScheduler.run(entries, operation: { entry in
+            await runner.restore(entry, target: prepared[entry.desktop.selectionKey], scene: scene)
+        }, finished: { outcome in
+            self.outcomes.append(outcome)
+            guard let entry = entries.first(where: { $0.id == outcome.windowID }) else { return }
+            let key = entry.desktop.selectionKey
+            let desktopIDs = Set(entries.filter { $0.desktop.selectionKey == key }.map(\.id))
+            let completed = self.outcomes.filter { desktopIDs.contains($0.windowID) }
+            if completed.count == desktopIDs.count {
+                let failures = completed.filter { $0.error != nil }.count
+                self.activities[key] = WorkspaceDesktopActivity(message: failures == 0 ? "已恢复并验证" : "\(failures) 项失败 · 可重试", failed: failures > 0)
+            }
+            self.onChange?()
+        })
+        // UI 结果顺序固定为模板顺序，避免并发完成次序让明细跳动。
+        outcomes.sort { left, right in
+            (scene.windows.firstIndex { $0.id == left.windowID } ?? 0) < (scene.windows.firstIndex { $0.id == right.windowID } ?? 0)
         }
-        let restored = try await bridge.restore(entry, profile: profile, canCreateGroups: canCreate, sceneWindowIDs: sceneWindowIDs)
-        return try await waitFor(timeout: 30, failure: "Chrome 已返回恢复结果，但无法唯一匹配“\(entry.label)”的系统窗口，请重试该条目。") {
-            let current = try await self.bridge.capture(profile: profile)
-            // 本次响应的窗口编号仅在当前浏览器连接中使用，允许保留快照外的用户标签。
-            guard let chrome = current.first(where: { $0.windowId == restored.windowId }) else { return nil }
-            let native = try await self.catalog.windows(bundleID: "com.google.Chrome")
-            return try? self.catalog.chromeWindow(chrome, among: native)
-        }
+        let failed = result.filter { $0.error != nil }.count
+        let failures = Set(activities.filter { selected.contains($0.key) && $0.value.failed }.map(\.key))
+        retryDesktopKeys.subtract(selected)
+        retryDesktopKeys.formUnion(failures)
+        let desktopFailures = failures.count
+        status = desktopFailures == 0 ? "已恢复 \(selected.count) 个桌面、\(result.count) 个窗口。"
+            : "已完成 \(result.count - failed) 个窗口，\(desktopFailures) 个桌面需要处理，可重试失败项。"
     }
 
-    /// WebStorm 始终按真实项目目录恢复；普通应用只在窗口能唯一识别时调整。
-    private func restoreApplication(_ entry: WorkspaceWindow) async throws -> WorkspaceNativeWindow {
-        guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: entry.bundleID) else {
-            throw WorkspaceError.message("找不到应用 \(entry.appName)。")
+    /// 项目修正与条目移除只更新所属桌面草稿，等待用户单独保存。
+    func updateProject(_ entry: WorkspaceWindow, path: String) {
+        library.edit(entry) { window in
+            window.projectPath = path
+            window.issues.removeAll { $0.contains("项目文件夹") }
         }
-        if let path = entry.projectPath, !FileManager.default.fileExists(atPath: path) {
-            throw WorkspaceError.message("项目文件夹不存在：\(path)")
-        }
-        if let existing = try await matchingApplication(entry) { return existing }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = false
-        if let path = entry.projectPath {
-            // WebStorm 只接收项目目录；--new-window 会被当成文件名并误开 LightEdit。
-            let process = Process()
-            process.executableURL = applicationURL.appendingPathComponent("Contents/MacOS/webstorm")
-            process.arguments = [path]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-        } else {
-            _ = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
-        }
-        return try await waitFor(timeout: 60, failure: "等待\(entry.label)窗口启动超时，请确认应用已完成加载后重试。") {
-            try await self.matchingApplication(entry)
-        }
+        activities.removeValue(forKey: entry.desktop.selectionKey)
+        status = "项目已更新，请保存所属桌面。"
+        onChange?()
     }
 
-    private func matchingApplication(_ entry: WorkspaceWindow) async throws -> WorkspaceNativeWindow? {
-        let windows = try await catalog.windows(bundleID: entry.bundleID)
-        if let path = entry.projectPath {
-            let matches = windows.filter { catalog.projectPath(for: $0) == path }
-            guard matches.count < 2 else { throw WorkspaceError.message("同一 WebStorm 项目存在多个窗口，请保留一个明确目标。") }
-            return matches.first
-        }
-        let named = windows.filter { $0.title == entry.title }
-        if named.count == 1 { return named[0] }
-        if windows.count == 1 { return windows[0] }
-        if windows.count > 1 { throw WorkspaceError.message("\(entry.appName)有多个窗口，无法确定要恢复的窗口。") }
-        return nil
+    func remove(_ entry: WorkspaceWindow) {
+        library.remove(entry)
+        activities.removeValue(forKey: entry.desktop.selectionKey)
+        status = "已从草稿移除窗口，请保存所属桌面。"
+        onChange?()
     }
 
-    /// 等待以实际状态为条件，不重复启动窗口；调用方提供阶段文案，避免把所有超时归因为应用弹窗。
-    @discardableResult
-    private func waitFor<T>(timeout: TimeInterval, failure: String, operation: () async throws -> T?) async throws -> T {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let value = try await operation() { return value }
-            try await Task.sleep(nanoseconds: 300_000_000)
-        }
-        throw WorkspaceError.message(failure)
+    /// 重绑是明确确认的模板写入，不操作真实桌面；同时转移勾选并清理旧结果。
+    func rebind(_ source: WorkspaceDesktop, to target: WorkspaceDesktop) {
+        guard !busy else { return }
+        do {
+            try library.rebind(source, to: target, store: store)
+            selectedKeys.remove(source.selectionKey)
+            selectedKeys.insert(target.selectionKey)
+            activities.removeValue(forKey: source.selectionKey)
+            activities.removeValue(forKey: target.selectionKey)
+            outcomes = []
+            retryDesktopKeys = []
+            status = "已重新绑定并保存到\(target.label)。"
+        } catch { status = error.localizedDescription }
+        onChange?()
     }
 }

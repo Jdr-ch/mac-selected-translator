@@ -178,7 +178,8 @@ final class WorkspaceWindowCatalog {
             guard description.hasPrefix("项目:") || description.hasPrefix("Project:") else { return nil }
             let help: String = Self.read(element, kAXHelpAttribute) ?? ""
             let path = (help as NSString).expandingTildeInPath
-            return FileManager.default.fileExists(atPath: path) ? path : nil
+            // 项目识别只读 IDE 已暴露的路径，不在每次窗口就绪轮询中访问文稿目录。
+            return path.hasPrefix("/") ? path : nil
         }
         if Set(candidates).count == 1 { return candidates[0] }
         let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/JetBrains")
@@ -192,7 +193,7 @@ final class WorkspaceWindowCatalog {
                       meta.attribute(forName: "frameTitle")?.stringValue == window.title,
                       let rawPath = entry.attribute(forName: "key")?.stringValue else { continue }
                 let path = rawPath.replacingOccurrences(of: "$USER_HOME$", with: FileManager.default.homeDirectoryForCurrentUser.path)
-                if FileManager.default.fileExists(atPath: path) { paths.insert(path) }
+                if path.hasPrefix("/") { paths.insert(path) }
             }
         }
         return paths.count == 1 ? paths.first : nil

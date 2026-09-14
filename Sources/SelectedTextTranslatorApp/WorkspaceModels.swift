@@ -8,9 +8,17 @@ struct WorkspaceScene: Codable {
     var profileToken: String
     var chromeProfileDirectory: String
     var windows: [WorkspaceWindow]
+    /// 新场景显式记录空桌面；旧版没有此字段时，从窗口中恢复桌面清单。
+    var desktops: [WorkspaceDesktop]? = nil
+
+    var savedDesktops: [WorkspaceDesktop] {
+        var seen: Set<String> = []
+        return ((desktops ?? []) + windows.map(\.desktop)).filter { seen.insert($0.selectionKey).inserted }
+            .sorted { $0.ordinal < $1.ordinal }
+    }
 }
 
-/// 桌面 UUID 与显示器 UUID 用于重新绑定；编号仅用于用户可读的桌面名称。
+/// 按显示器与“桌面 N”绑定；系统 UUID 和 Space ID 仅描述采集时的实际空间。
 struct WorkspaceDesktop: Codable, Equatable, Identifiable {
     var id: String
     var displayID: String
@@ -18,6 +26,7 @@ struct WorkspaceDesktop: Codable, Equatable, Identifiable {
     var spaceID: UInt64
     var screenFrame: CGRect
     var label: String { "桌面 \(ordinal)" }
+    var selectionKey: String { "\(displayID)#\(ordinal)" }
 }
 
 /// 窗口位置相对屏幕可用区域保存，同一分辨率精确还原，变化时按比例适配。
@@ -104,8 +113,8 @@ enum WorkspaceGeometry {
     }
 
     static func resolve(_ saved: WorkspaceDesktop, in desktops: [WorkspaceDesktop]) throws -> WorkspaceDesktop {
-        guard let desktop = desktops.first(where: { $0.id == saved.id && $0.displayID == saved.displayID }) else {
-            throw WorkspaceError.message("\(saved.label)或对应显示器已变化，请在预览中重新绑定桌面。")
+        guard let desktop = desktops.first(where: { $0.selectionKey == saved.selectionKey }) else {
+            throw WorkspaceError.message("未找到原显示器上的\(saved.label)，请重新绑定桌面。")
         }
         return desktop
     }
@@ -127,7 +136,7 @@ final class WorkspaceSceneStore {
     }
 
     func save(_ scene: WorkspaceScene) throws {
-        guard !scene.windows.isEmpty, scene.windows.allSatisfy({ $0.issues.isEmpty }) else {
+        guard !scene.savedDesktops.isEmpty, scene.windows.allSatisfy({ $0.issues.isEmpty }) else {
             throw WorkspaceError.message("请先补全待处理条目，再保存工作场景。")
         }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

@@ -1,27 +1,63 @@
 import AppKit
 
-/// 场景管理面板展示采集预览与逐项结果；修改只影响模板，不直接操作用户窗口。
+/// 背景层随系统外观刷新，保持 B 方案的浅灰面板、白色卡片和细分隔线。
 @MainActor
-final class WorkspaceSceneWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+private final class WorkspaceSceneSurface: NSView {
+    var surfaceColor = WorkspaceScenePalette.window
+    var bordered = false
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateAppearance() }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateAppearance() }
+    func updateAppearance() {
+        wantsLayer = true
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = surfaceColor.cgColor
+            layer?.borderColor = WorkspaceScenePalette.line.cgColor
+        }
+        layer?.borderWidth = bordered ? 1 : 0
+        layer?.cornerRadius = bordered ? 9 : 0
+    }
+}
+
+private final class WorkspaceDesktopStack: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
+/// B 方案：桌面卡片和窗口详情共享 session；整行勾选与行内业务按钮使用独立事件入口。
+@MainActor
+final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate {
     let session = WorkspaceSceneController()
-    private let table = NSTableView()
+    private let cards = WorkspaceDesktopStack()
+    private let scroll = NSScrollView()
+    private var cardViews: [String: WorkspaceDesktopCardView] = [:]
+    /// 明细焦点与恢复勾选分离：行内操作可查看该桌面，不修改批量操作范围。
+    private var focusedDesktopKey: String?
+    private var focusedWindowID: String?
+    private var detailEntries: [WorkspaceWindow] = []
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let selectionLabel = NSTextField(labelWithString: "")
     private let details = NSTextView()
-    private let captureButton = NSButton(title: "采集桌面 3、4、5", target: nil, action: nil)
-    private let saveButton = NSButton(title: "保存场景", target: nil, action: nil)
-    private let restoreButton = NSButton(title: "恢复场景", target: nil, action: nil)
-    private let retryButton = NSButton(title: "重试失败项", target: nil, action: nil)
-    private let projectButton = NSButton(title: "选择项目…", target: nil, action: nil)
-    private let rebindButton = NSButton(title: "重新绑定桌面…", target: nil, action: nil)
-    private let removeButton = NSButton(title: "从模板移除", target: nil, action: nil)
+    private let detailTitle = NSTextField(labelWithString: "窗口详情")
+    private let windowPicker = NSPopUpButton()
+    private let selectAllButton = NSButton(checkboxWithTitle: "全选", target: nil, action: nil)
+    private let refreshButton = WorkspaceSceneButton(title: "刷新桌面", target: nil, action: nil)
+    private let captureButton = WorkspaceSceneButton(title: "采集所选", target: nil, action: nil)
+    private let saveButton = WorkspaceSceneButton(title: "保存所选", target: nil, action: nil)
+    private let restoreButton = WorkspaceSceneButton(title: "恢复所选", target: nil, action: nil)
+    private let retryButton = WorkspaceSceneButton(title: "重试失败项", target: nil, action: nil)
+    private let projectButton = WorkspaceSceneButton(title: "选择项目…", target: nil, action: nil)
+    private let rebindButton = WorkspaceSceneButton(title: "重新绑定桌面…", target: nil, action: nil)
+    private let removeButton = WorkspaceSceneButton(title: "从模板移除窗口", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 720),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "工作场景"
-        window.minSize = NSSize(width: 680, height: 620)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.minSize = NSSize(width: 740, height: 640)
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        window.delegate = self
         buildContent()
         session.onChange = { [weak self] in self?.refresh() }
         session.load()
@@ -29,102 +65,274 @@ final class WorkspaceSceneWindowController: NSWindowController, NSTableViewDataS
 
     required init?(coder: NSCoder) { fatalError("不使用归档初始化") }
 
-    /// 菜单入口只展示管理窗口，用户在窗口内选择采集或恢复。
     func show() {
-        window?.center()
+        session.refreshDesktops()
+        if window?.isVisible != true { window?.center() }
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        layoutCards()
     }
 
     private func buildContent() {
-        guard let content = window?.contentView else { return }
-        let title = NSTextField(labelWithString: "一次保存，一键回到工作状态")
-        title.font = .systemFont(ofSize: 21, weight: .semibold)
-        let subtitle = NSTextField(wrappingLabelWithString: "记录桌面 3、4、5 中的项目、网页群组与窗口布局。清单仅保存在本机。")
-        subtitle.textColor = .secondaryLabelColor
-        let actions = NSStackView(views: [captureButton, saveButton, restoreButton, retryButton])
-        actions.spacing = 10
-        let edits = NSStackView(views: [projectButton, rebindButton, removeButton])
-        edits.spacing = 10
-        let controls: [(NSButton, Selector)] = [(captureButton, #selector(capture)), (saveButton, #selector(save)),
-            (restoreButton, #selector(restore)), (retryButton, #selector(retry)), (projectButton, #selector(selectProject)),
-            (rebindButton, #selector(rebindDesktop)), (removeButton, #selector(removeEntry))]
-        for (button, action) in controls { button.target = self; button.action = action; button.bezelStyle = .rounded }
+        guard let window else { return }
+        let content = WorkspaceSceneSurface()
+        window.contentView = content
+        content.updateAppearance()
+        let title = NSTextField(labelWithString: "工作场景")
+        title.font = .systemFont(ofSize: 14, weight: .medium)
+        title.textColor = WorkspaceScenePalette.text
+        title.alignment = .center
+        let header = NSView()
+        header.addSubview(title)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([title.centerXAnchor.constraint(equalTo: header.centerXAnchor),
+            title.centerYAnchor.constraint(equalTo: header.centerYAnchor)])
+        let divider = NSBox()
+        divider.boxType = .separator
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let actions = NSStackView(views: [selectAllButton, selectionLabel, spacer, captureButton, saveButton, restoreButton])
+        actions.spacing = 8
+        selectionLabel.font = .systemFont(ofSize: 12)
+        selectionLabel.textColor = WorkspaceScenePalette.secondary
+        let tools = NSStackView(views: [refreshButton, retryButton])
+        tools.spacing = 8
+        let controls: [(NSButton, Selector)] = [(selectAllButton, #selector(toggleAllDesktops)), (refreshButton, #selector(refreshDesktops)),
+            (captureButton, #selector(capture)), (saveButton, #selector(save)), (restoreButton, #selector(restore)),
+            (retryButton, #selector(retry)), (projectButton, #selector(selectProject)), (rebindButton, #selector(rebindDesktop)),
+            (removeButton, #selector(removeEntry)), (windowPicker, #selector(selectWindow))]
+        for (button, action) in controls { button.target = self; button.action = action; button.isBordered = false }
+        selectAllButton.allowsMixedState = true
+        for button in [refreshButton, retryButton, projectButton, rebindButton, removeButton] { button.style = .link }
+        restoreButton.style = .primary
         restoreButton.keyEquivalent = "\r"
-        let scroll = NSScrollView()
+        cards.orientation = .vertical
+        cards.alignment = .leading
+        cards.spacing = 8
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        for (id, label, width) in [("desktop", "目标桌面", 100.0), ("window", "项目与窗口", 330.0), ("result", "状态", 380.0)] {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-            column.title = label
-            column.width = width
-            table.addTableColumn(column)
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = cards
+        let detailSurface = buildDetails()
+        let footer = NSTextField(labelWithString: "默认勾选已保存桌面 · 保存仅更新所选桌面")
+        footer.font = .systemFont(ofSize: 11)
+        footer.textColor = WorkspaceScenePalette.secondary
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.textColor = WorkspaceScenePalette.secondary
+        for view in [header, divider, actions, tools, scroll, detailSurface, footer, statusLabel] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(view)
         }
-        table.delegate = self
-        table.dataSource = self
-        table.rowHeight = 38
-        table.usesAlternatingRowBackgroundColors = true
-        table.allowsMultipleSelection = false
-        scroll.documentView = table
-        let detailScroll = NSScrollView()
-        detailScroll.hasVerticalScroller = true
-        detailScroll.borderType = .bezelBorder
-        details.isEditable = false
-        details.isSelectable = true
-        details.font = .systemFont(ofSize: 12)
-        details.textContainerInset = NSSize(width: 8, height: 8)
-        details.autoresizingMask = [.width]
-        details.textContainer?.widthTracksTextView = true
-        detailScroll.documentView = details
-        let stack = NSStackView(views: [title, subtitle, actions, scroll, edits, detailScroll, statusLabel])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -22),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            header.topAnchor.constraint(equalTo: content.topAnchor), header.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: content.trailingAnchor), header.heightAnchor.constraint(equalToConstant: 44),
+            divider.topAnchor.constraint(equalTo: header.bottomAnchor), divider.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: content.trailingAnchor), divider.heightAnchor.constraint(equalToConstant: 1),
+            actions.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 16), actions.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            actions.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16), actions.heightAnchor.constraint(equalToConstant: 30),
+            tools.topAnchor.constraint(equalTo: actions.bottomAnchor, constant: 6), tools.leadingAnchor.constraint(equalTo: actions.leadingAnchor),
+            tools.heightAnchor.constraint(equalToConstant: 26), scroll.topAnchor.constraint(equalTo: tools.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: actions.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            detailScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            detailScroll.heightAnchor.constraint(equalToConstant: 150),
-            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            detailSurface.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 12),
+            detailSurface.leadingAnchor.constraint(equalTo: actions.leadingAnchor), detailSurface.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
+            detailSurface.heightAnchor.constraint(equalToConstant: 188), footer.topAnchor.constraint(equalTo: detailSurface.bottomAnchor, constant: 10),
+            footer.leadingAnchor.constraint(equalTo: actions.leadingAnchor), statusLabel.topAnchor.constraint(equalTo: footer.bottomAnchor, constant: 7),
+            statusLabel.leadingAnchor.constraint(equalTo: actions.leadingAnchor), statusLabel.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
+            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14)
         ])
         statusLabel.setContentCompressionResistancePriority(.required, for: .vertical)
     }
 
-    /// busy、待补充项与失败结果驱动按钮状态，避免请求交错或未保存模板被恢复。
+    /// 窗口详情保留全部网址、群组、项目和编辑入口，改用与桌面卡片一致的圆角白色区域。
+    private func buildDetails() -> NSView {
+        let surface = WorkspaceSceneSurface()
+        surface.surfaceColor = WorkspaceScenePalette.content
+        surface.bordered = true
+        surface.updateAppearance()
+        detailTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        detailTitle.textColor = WorkspaceScenePalette.text
+        windowPicker.font = .systemFont(ofSize: 12)
+        windowPicker.setAccessibilityLabel("选择要查看的窗口")
+        let header = NSStackView(views: [detailTitle, windowPicker])
+        header.spacing = 12
+        let detailScroll = NSScrollView()
+        detailScroll.hasVerticalScroller = true
+        detailScroll.autohidesScrollers = true
+        detailScroll.drawsBackground = false
+        details.isEditable = false
+        details.isSelectable = true
+        details.drawsBackground = false
+        details.textColor = WorkspaceScenePalette.text
+        details.font = .systemFont(ofSize: 12)
+        details.textContainerInset = NSSize(width: 2, height: 4)
+        details.autoresizingMask = [.width]
+        details.textContainer?.widthTracksTextView = true
+        detailScroll.documentView = details
+        let edits = NSStackView(views: [projectButton, rebindButton, removeButton])
+        edits.spacing = 12
+        for view in [header, detailScroll, edits] { view.translatesAutoresizingMaskIntoConstraints = false; surface.addSubview(view) }
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: surface.topAnchor, constant: 10), header.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: 14),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: surface.trailingAnchor, constant: -14), header.heightAnchor.constraint(equalToConstant: 25),
+            windowPicker.widthAnchor.constraint(lessThanOrEqualToConstant: 440),
+            detailScroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 6), detailScroll.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            detailScroll.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -14),
+            edits.topAnchor.constraint(equalTo: detailScroll.bottomAnchor, constant: 5), edits.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            edits.heightAnchor.constraint(equalToConstant: 26), edits.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -8)
+        ])
+        return surface
+    }
+
+    /// 卡片对象按桌面键复用，阶段更新不会重新创建运行光带。
     private func refresh() {
-        let selected = table.selectedRow
-        table.reloadData()
-        if selected >= 0, selected < numberOfRows(in: table) { table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false) }
+        let desktops = session.desktops
+        let keys = Set(desktops.map(\.selectionKey))
+        for key in Set(cardViews.keys).subtracting(keys) {
+            if let view = cardViews.removeValue(forKey: key) { cards.removeArrangedSubview(view); view.removeFromSuperview() }
+        }
+        for (index, desktop) in desktops.enumerated() {
+            let key = desktop.selectionKey
+            let card = cardViews[key] ?? WorkspaceDesktopCardView()
+            if cardViews[key] == nil {
+                cardViews[key] = card
+                card.heightAnchor.constraint(equalToConstant: 90).isActive = true
+                card.onToggle = { [weak self] in self?.toggleDesktop(key) }
+                card.onCapture = { [weak self] in self?.focus(key); Task { await self?.session.capture(keys: [key]) } }
+                card.onSave = { [weak self] in self?.focus(key); self?.session.save(keys: [key]) }
+                card.onRestore = { [weak self] in self?.focus(key); Task { await self?.session.restore(keys: [key]) } }
+                cards.insertArrangedSubview(card, at: index)
+                card.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
+            }
+            card.configure(desktop: desktop, windows: session.library.windows(for: key), displayName: displayName(desktop),
+                saved: session.savedKeys.contains(key), draft: session.library.drafts[key] != nil,
+                selected: session.selectedKeys.contains(key), activity: session.activity(for: desktop), busy: session.busy,
+                canCapture: session.canCapture(key), canSave: session.canSave(key), canRestore: session.canRestore(key))
+        }
+        if focusedDesktopKey == nil || !keys.contains(focusedDesktopKey!) {
+            focusedDesktopKey = desktops.first(where: { session.savedKeys.contains($0.selectionKey) })?.selectionKey ?? desktops.first?.selectionKey
+            focusedWindowID = nil
+        }
         statusLabel.stringValue = session.status
-        captureButton.isEnabled = !session.busy
-        saveButton.isEnabled = !session.busy && session.scene?.windows.isEmpty == false
-        restoreButton.isEnabled = !session.busy && session.scene != nil && !session.isDirty
-        retryButton.isEnabled = !session.busy && session.outcomes.contains { $0.error != nil } && !session.isDirty
-        refreshSelection()
+        selectionLabel.stringValue = "已勾选 \(session.selectedKeys.count) 个桌面"
+        selectAllButton.state = session.selectedKeys.isEmpty ? .off : (keys.isSubset(of: session.selectedKeys) ? .on : .mixed)
+        selectAllButton.isEnabled = !session.busy
+        refreshButton.isEnabled = !session.busy
+        captureButton.isEnabled = session.selectedKeys.contains { session.canCapture($0) }
+        saveButton.isEnabled = session.selectedKeys.contains { session.canSave($0) }
+        restoreButton.isEnabled = session.selectedKeys.contains { session.canRestore($0) }
+        retryButton.isEnabled = !session.busy && !session.selectedKeys.intersection(session.failedKeys).isEmpty
+        refreshDetails()
+        layoutCards()
     }
 
-    private func refreshSelection() {
-        let entry = selectedEntry()
-        projectButton.isEnabled = !session.busy && entry?.bundleID == "com.jetbrains.WebStorm"
-        rebindButton.isEnabled = !session.busy && entry != nil
-        removeButton.isEnabled = !session.busy && entry != nil
-        details.string = entry.map(detailText) ?? "选择窗口，查看项目路径、完整网址顺序和布局。"
+    /// 文档高度只随桌面数量变化；窗口缩放只重排宽度，长列表使用原生滚动条。
+    private func layoutCards() {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        cards.frame = NSRect(x: 0, y: 0, width: scroll.contentSize.width,
+            height: CGFloat(cardViews.count) * 90 + CGFloat(max(cardViews.count - 1, 0)) * 8)
+        cards.layoutSubtreeIfNeeded()
+    }
+    func windowDidResize(_ notification: Notification) { layoutCards() }
+
+    private func displayName(_ desktop: WorkspaceDesktop) -> String {
+        for screen in NSScreen.screens {
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32,
+                  let uuid = CGDisplayCreateUUIDFromDisplayID(number)?.takeRetainedValue() else { continue }
+            if CFUUIDCreateString(nil, uuid) as String == desktop.displayID {
+                return CGDisplayIsBuiltin(number) != 0 ? "内建显示器" : screen.localizedName
+            }
+        }
+        return "显示器未连接"
     }
 
-    /// 预览必须能够核对完整快照；表格保持简洁，所选项在下方展示所有标签与布局。
+    private func selectedDesktop() -> WorkspaceDesktop? { session.desktops.first { $0.selectionKey == focusedDesktopKey } }
+    private func selectedEntry() -> WorkspaceWindow? { detailEntries.first { $0.id == focusedWindowID } }
+
+    private func refreshDetails() {
+        detailEntries = focusedDesktopKey.map { session.library.windows(for: $0) } ?? []
+        if !detailEntries.contains(where: { $0.id == focusedWindowID }) { focusedWindowID = detailEntries.first?.id }
+        windowPicker.removeAllItems()
+        windowPicker.addItems(withTitles: detailEntries.map(\.label))
+        if let index = detailEntries.firstIndex(where: { $0.id == focusedWindowID }) { windowPicker.selectItem(at: index) }
+        windowPicker.isEnabled = !detailEntries.isEmpty
+        detailTitle.stringValue = (selectedDesktop()?.label ?? "桌面") + " · 窗口详情"
+        projectButton.isEnabled = !session.busy && selectedEntry()?.bundleID == "com.jetbrains.WebStorm"
+        rebindButton.isEnabled = !session.busy && focusedDesktopKey.map { session.savedKeys.contains($0) } == true
+        removeButton.isEnabled = !session.busy && selectedEntry() != nil
+        if let entry = selectedEntry() { details.string = detailText(entry) }
+        else if let desktop = selectedDesktop() { details.string = "\(desktop.label) · \(session.activity(for: desktop).message)\n采集后可在这里检查窗口、群组和布局。" }
+        else { details.string = "点击桌面卡片可切换勾选，并在这里查看窗口详情。" }
+    }
+
+    /// 行内按钮只改变明细焦点，整行点击则同时切换勾选；运行中禁止改变执行范围。
+    private func focus(_ key: String) { focusedDesktopKey = key; focusedWindowID = nil; refreshDetails() }
+    private func toggleDesktop(_ key: String) {
+        guard !session.busy else { return }
+        if session.selectedKeys.contains(key) { session.selectedKeys.remove(key) } else { session.selectedKeys.insert(key) }
+        focus(key)
+        refresh()
+    }
+    @objc private func toggleAllDesktops() {
+        let keys = Set(session.desktops.map(\.selectionKey))
+        session.selectedKeys = keys.isSubset(of: session.selectedKeys) ? [] : keys
+        refresh()
+    }
+    @objc private func selectWindow() {
+        guard detailEntries.indices.contains(windowPicker.indexOfSelectedItem) else { return }
+        focusedWindowID = detailEntries[windowPicker.indexOfSelectedItem].id
+        refreshDetails()
+    }
+    @objc private func refreshDesktops() { session.refreshDesktops() }
+    @objc private func capture() { Task { await session.capture() } }
+    @objc private func save() { session.save() }
+    @objc private func restore() { Task { await session.restore() } }
+    @objc private func retry() { Task { await session.restore(failedOnly: true) } }
+
+    @objc private func selectProject() {
+        guard let entry = selectedEntry(), let window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "为 \(entry.title) 选择 WebStorm 项目文件夹"
+        panel.beginSheetModal(for: window) { [weak self] result in
+            guard result == .OK, let path = panel.url?.path else { return }
+            self?.session.updateProject(entry, path: path)
+        }
+    }
+
+    /// 重新绑定仍作用于整桌面模板，确认后原子保存，保留目标桌面已有窗口。
+    @objc private func rebindDesktop() {
+        guard let desktop = selectedDesktop(), let window else { return }
+        session.refreshDesktops()
+        let targets = session.currentDesktops
+        guard !targets.isEmpty else { return }
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 28))
+        popup.addItems(withTitles: targets.map { "\($0.label) · \($0.displayID.prefix(8))" })
+        let alert = NSAlert()
+        alert.messageText = "重新绑定 \(desktop.label) 的所有窗口"
+        alert.informativeText = "保存到新的目标桌面，保留目标已有模板。此操作不会移动真实窗口。"
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "绑定并保存")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, targets.indices.contains(popup.indexOfSelectedItem) else { return }
+            self?.session.rebind(desktop, to: targets[popup.indexOfSelectedItem])
+        }
+    }
+    @objc private func removeEntry() { if let entry = selectedEntry() { session.remove(entry) } }
+    /// 单项明细保留完整网址顺序、群组属性与布局；失败原因不依赖被截断的行内摘要。
     private func detailText(_ entry: WorkspaceWindow) -> String {
         let frame = WorkspaceGeometry.absolute(entry.relativeFrame, in: entry.desktop.screenFrame)
         var lines = [entry.label, "\(entry.desktop.label) · 位置 (\(Int(frame.minX)), \(Int(frame.minY))) · 大小 \(Int(frame.width)) × \(Int(frame.height))"]
+        if let outcome = session.outcomes.first(where: { $0.windowID == entry.id }) { lines.append(outcome.error ?? "已恢复并验证") }
+        lines += entry.issues
         if let path = entry.projectPath { lines.append("项目：\(path)") }
         if let chrome = entry.chrome {
             let colors = ["grey": "灰色", "blue": "蓝色", "red": "红色", "yellow": "黄色", "green": "绿色",
-                          "pink": "粉色", "purple": "紫色", "cyan": "青色", "orange": "橙色"]
+                "pink": "粉色", "purple": "紫色", "cyan": "青色", "orange": "橙色"]
             for group in chrome.groups {
                 lines.append("群组：\(group.title) · \(colors[group.color] ?? group.color) · \(group.collapsed ? "已折叠" : "已展开")")
             }
@@ -136,84 +344,5 @@ final class WorkspaceSceneWindowController: NSWindowController, NSTableViewDataS
         return lines.joined(separator: "\n")
     }
 
-    private func selectedEntry() -> WorkspaceWindow? {
-        guard let windows = session.scene?.windows, windows.indices.contains(table.selectedRow) else { return nil }
-        return windows[table.selectedRow]
-    }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { session.scene?.windows.count ?? 0 }
-    func tableViewSelectionDidChange(_ notification: Notification) { refreshSelection() }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let entry = session.scene?.windows[row] else { return nil }
-        let text: String
-        switch tableColumn?.identifier.rawValue {
-        case "desktop": text = entry.desktop.label
-        case "window": text = entry.label
-        default:
-            if let outcome = session.outcomes.first(where: { $0.windowID == entry.id }) { text = outcome.error ?? "已恢复并验证" }
-            else { text = entry.issues.isEmpty ? "已采集" : entry.issues.joined(separator: "；") }
-        }
-        let label = NSTextField(labelWithString: text)
-        label.lineBreakMode = .byTruncatingTail
-        label.toolTip = tableColumn?.identifier.rawValue == "window" ? entry.projectPath ?? text : text
-        return label
-    }
-
-    @objc private func capture() { Task { await session.capture() } }
-    @objc private func save() { session.save() }
-    @objc private func restore() { Task { await session.restore() } }
-    @objc private func retry() { Task { await session.restore(failedOnly: true) } }
-
-    /// 用户选择的目录仅写入当前草稿，保存后才成为下次恢复的项目目标。
-    @objc private func selectProject() {
-        guard let entry = selectedEntry(), let window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "为 \(entry.title) 选择 WebStorm 项目文件夹"
-        panel.beginSheetModal(for: window) { [weak self] result in
-            guard result == .OK, let path = panel.url?.path, let self,
-                  let index = self.session.scene?.windows.firstIndex(where: { $0.id == entry.id }) else { return }
-            self.session.scene?.windows[index].projectPath = path
-            self.session.scene?.windows[index].issues.removeAll { $0.contains("项目文件夹") }
-            self.session.isDirty = true
-            self.session.status = "项目已更新，请保存场景。"
-            self.refresh()
-        }
-    }
-
-    /// 桌面发生变化时要求明确选择当前目标，保留原相对布局而不按旧编号自动迁移。
-    @objc private func rebindDesktop() {
-        guard let entry = selectedEntry(), let window else { return }
-        do {
-            let desktops = try session.catalog.desktop.desktops()
-            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
-            popup.addItems(withTitles: desktops.map { "\($0.label) · \($0.displayID.prefix(8))" })
-            let alert = NSAlert()
-            alert.messageText = "选择新的目标桌面"
-            alert.informativeText = entry.label
-            alert.accessoryView = popup
-            alert.addButton(withTitle: "绑定")
-            alert.addButton(withTitle: "取消")
-            alert.beginSheetModal(for: window) { [weak self] response in
-                guard response == .alertFirstButtonReturn, let self, desktops.indices.contains(popup.indexOfSelectedItem),
-                      let index = self.session.scene?.windows.firstIndex(where: { $0.id == entry.id }) else { return }
-                self.session.scene?.windows[index].desktop = desktops[popup.indexOfSelectedItem]
-                self.session.isDirty = true
-                self.session.status = "桌面绑定已更新，请保存场景。"
-                self.refresh()
-            }
-        } catch { session.status = error.localizedDescription; refresh() }
-    }
-
-    /// 移除仅影响待保存模板，不关闭或移动真实窗口。
-    @objc private func removeEntry() {
-        guard let entry = selectedEntry() else { return }
-        session.scene?.windows.removeAll { $0.id == entry.id }
-        session.isDirty = true
-        session.status = "已从模板移除此项，请保存场景。"
-        refresh()
-    }
 }
