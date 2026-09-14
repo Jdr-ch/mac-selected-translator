@@ -2,7 +2,7 @@ import AppKit
 import ServiceManagement
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private let backendClient: BackendClient
     private let backendSupervisor: BackendSupervisor
     private let modelSelection: ModelSelectionStore
@@ -24,11 +24,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     /// Updates the standard status-button image so AppKit can reuse it on every display's menu bar.
     private var statusIconAnimator: StatusItemIconAnimator?
-    /// Intercepts only the green-light region before the status item's native menu begins tracking.
+    /// 捕获原生按钮的来源应用，并保留独立休眠绿灯命中区域。
     private var statusItemMouseMonitor: Any?
     /// Retained so the status-menu label follows both the menu toggle and the green indicator.
     private var sleepMenuItem: NSMenuItem?
     private var modelMenuItem: NSMenuItem?
+    /// 电源模块独立采集与缓存，不参与 A/文动画的逐帧计算。
+    private let powerMonitor = PowerMonitor()
+    private let powerStatusDisplay = PowerStatusDisplay()
+    private var powerPopover: PowerPopoverController?
+    private var powerMetric = PowerDisplayMetric(rawValue: UserDefaults.standard.string(forKey: PowerDisplayMetric.defaultsKey) ?? "") ?? .watts
+    private var powerPresentation = PowerPresentation(snapshot: PowerSnapshot(), metric: .watts)
+    /// 鼠标按下时先捕获选区来源，避免弹出面板改变前台应用后再读取。
+    private var statusSourceCaptured = false
     /// Drives the faster icon rhythm for the lifetime of one translation request.
     private var isTranslating = false {
         didSet {
@@ -81,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyMonitor?.stop()
         statusIconAnimator?.stop()
+        powerMonitor.stop()
+        powerPopover?.close()
         if let statusItemMouseMonitor {
             NSEvent.removeMonitor(statusItemMouseMonitor)
         }
@@ -96,20 +106,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupStatusItem() {
         let statusBar = NSStatusBar.system
-        let item = statusBar.statusItem(
-            withLength: StatusItemVisualStyle.itemLength(statusBarThickness: statusBar.thickness)
-        )
+        let item = statusBar.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             button.title = ""
-            button.imagePosition = .imageOnly
+            button.imagePosition = .imageRight
             button.imageScaling = .scaleNone
             button.toolTip = "划词翻译：按 Option+Tab"
             button.setAccessibilityLabel("划词翻译")
+            button.target = self
+            button.action = #selector(toggleStatusPopover)
             setupStatusIcon(in: button, statusBarThickness: statusBar.thickness)
         }
 
         let menu = NSMenu()
-        menu.delegate = self
         menu.addItem(makeMenuItem(title: "翻译当前选中文字", action: #selector(translateFromMenu)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "整理", action: #selector(organizeWindows)))
@@ -141,42 +150,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
         statusItem = item
-        item.menu = menu
+        powerPopover = PowerPopoverController(menu: menu, metric: powerMetric)
+        powerPopover?.onVisibilityChange = { [weak self] visible in self?.powerMonitor.setPanelVisible(visible) }
+        powerPopover?.onMetricChange = { [weak self] metric in
+            guard let self else { return }
+            self.powerMetric = metric
+            UserDefaults.standard.set(metric.rawValue, forKey: PowerDisplayMetric.defaultsKey)
+            self.updatePowerSnapshot(self.powerMonitor.snapshot)
+        }
+        powerMonitor.onChange = { [weak self] snapshot in self?.updatePowerSnapshot(snapshot) }
         installStatusItemMouseMonitor()
         updateSleepPreventionUI()
+        updatePowerSnapshot(powerMonitor.snapshot)
+        powerMonitor.start()
     }
 
-    /// Starts frame rendering into the standard status-button image used by every menu-bar context.
+    /// 原生图片承载原有动画，主题变化时单独通知静态电源前缀。
     private func setupStatusIcon(in statusButton: NSStatusBarButton, statusBarThickness: CGFloat) {
         let animator = StatusItemIconAnimator(
             button: statusButton,
             statusBarThickness: statusBarThickness
         )
+        animator.onAppearanceChange = { [weak self] in self?.updatePowerStatusButton() }
         animator.start()
         statusIconAnimator = animator
     }
 
-    /// Lets native menu tracking handle icon clicks while consuming only active green-light clicks.
+    /// 保留原生按钮事件链，只消费当前图片中的休眠绿灯；新增标题区域一律打开面板。
     private func installStatusItemMouseMonitor() {
         statusItemMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
             [weak self] event in
             guard let self,
-                  self.sleepPreventionController.isPreventingSleep,
                   let button = self.statusItem?.button,
                   event.window === button.window else {
                 return event
             }
 
             let point = button.convert(event.locationInWindow, from: nil)
-            guard button.bounds.contains(point),
-                  StatusItemVisualStyle.hitTarget(
-                    at: point,
-                    in: button.bounds.size,
-                    isPreventingSleep: true
-                  ) == .sleepIndicator else {
-                return event
+            guard button.bounds.contains(point) else { return event }
+            if self.powerPopover?.isShown != true {
+                self.menuSourceApplication = NSWorkspace.shared.frontmostApplication
+                self.statusSourceCaptured = true
             }
-
+            let imageFrame = button.cell?.imageRect(forBounds: button.bounds) ?? .zero
+            guard StatusItemVisualStyle.hitTarget(at: point, buttonBounds: button.bounds, imageFrame: imageFrame,
+                isPreventingSleep: self.sleepPreventionController.isPreventingSleep) == .sleepIndicator else { return event }
+            self.statusSourceCaptured = false
             self.restoreSleepFromStatusIndicator()
             return nil
         }
@@ -200,15 +219,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Keeps the menu action and the combined status-item presentation synchronized.
+    /// 休眠控制器仍是唯一状态来源，同时更新命令标题与原绿灯。
     private func updateSleepPreventionUI() {
         sleepMenuItem?.title = sleepPreventionController.actionTitle
+        powerPopover?.refreshCommands()
         updateStatusItemAppearance()
     }
 
-    /// Places the pulsing green light directly left of the icon inside the stable status-item slot.
+    /// 原绿灯仍由休眠控制器驱动，电源前缀的静态附件单独更新。
     private func updateStatusItemAppearance() {
-        guard let button = statusItem?.button else {
+        guard statusItem?.button != nil else {
             return
         }
 
@@ -216,13 +236,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusIconAnimator?.isPreventingSleep = isPreventingSleep
         statusIconAnimator?.isSleepIndicatorBright = sleepPreventionController.isSleepStatusLightBright
 
-        if isPreventingSleep {
-            button.toolTip = "划词翻译；禁止休眠中：按 Option+Tab"
-            button.setAccessibilityLabel("划词翻译，禁止休眠中")
-        } else {
-            button.toolTip = "划词翻译：按 Option+Tab"
-            button.setAccessibilityLabel("划词翻译")
+        updatePowerStatusButton()
+    }
+
+    /// 数值转换只发生在新快照或单位切换时，菜单栏与左栏共享同一份显示结果。
+    private func updatePowerSnapshot(_ snapshot: PowerSnapshot) {
+        powerPresentation = PowerPresentation(snapshot: snapshot, metric: powerMetric)
+        updatePowerStatusButton()
+        powerPopover?.update(snapshot: snapshot, presentation: powerPresentation)
+    }
+
+    /// 标题附件变化才重绘；主题改变时独立失效缓存，不扩大原动态图像的尺寸。
+    private func updatePowerStatusButton() {
+        guard let button = statusItem?.button else { return }
+        powerStatusDisplay.update(powerPresentation, button: button)
+        var description = "划词翻译；\(powerPresentation.state.title)，\(powerPresentation.percent)"
+        if !powerPresentation.menuValue.isEmpty { description += "；电池充入 \(powerPresentation.menuValue)" }
+        if sleepPreventionController.isPreventingSleep { description += "；禁止休眠中" }
+        button.toolTip = description + "；按 Option+Tab"
+        button.setAccessibilityLabel(description)
+    }
+
+    /// 原生按钮的 target-action 打开同一面板，辅助功能触发时也先记录来源应用。
+    @objc private func toggleStatusPopover() {
+        guard let button = statusItem?.button else { return }
+        if powerPopover?.isShown != true, !statusSourceCaptured {
+            menuSourceApplication = NSWorkspace.shared.frontmostApplication
         }
+        statusSourceCaptured = false
+        powerPopover?.toggle(relativeTo: button)
     }
 
     /// Creates status-menu commands that route directly to the app delegate.
@@ -260,25 +302,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Handles the global Option+Tab gesture.
-    ///
-    /// The method serializes translation requests so repeated hotkey presses do
-    /// not create overlapping model calls or race the floating panel state.
-    private func handleTranslateShortcut() {
+    /// 快捷键捕获当前应用，菜单使用展开前的来源；串行翻译避免重复请求与浮层竞态。
+    private func handleTranslateShortcut(sourceApplication: NSRunningApplication? = nil) {
         guard translationTask == nil else { return }
-
+        let source = sourceApplication ?? NSWorkspace.shared.frontmostApplication
         translationTask = Task { @MainActor in
-            await translateCurrentSelection()
+            await translateCurrentSelection(from: source)
             translationTask = nil
         }
     }
 
-    /// Reads the selected text, calls the local LangChain service, and renders the result.
-    ///
-    /// Each UI state is shown immediately near the pointer so the user can tell
-    /// whether the failure happened in macOS text capture, local backend
-    /// connectivity, or the remote model request.
-    private func translateCurrentSelection() async {
+    /// 从已捕获应用读取选区，保持原有服务调用与鼠标附近的分阶段状态反馈。
+    private func translateCurrentSelection(from sourceApplication: NSRunningApplication?) async {
         let provider = modelSelection.provider
         let reasoning = modelSelection.reasoning(for: provider)
         isTranslating = true
@@ -291,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             floatingPanel.showLoading("正在检查本地翻译服务...")
             try await backendSupervisor.ensureBackendRunning()
             try Task.checkCancellation()
-            let selectedText = try await selectionReader.readSelectedText()
+            let selectedText = try await selectionReader.readSelectedText(from: sourceApplication)
             try Task.checkCancellation()
             floatingPanel.showLoading("正在翻译...")
             let result = try await backendClient.translate(selectedText, targetLanguage: "auto",
@@ -309,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func translateFromMenu() {
-        handleTranslateShortcut()
+        handleTranslateShortcut(sourceApplication: menuSourceApplication)
     }
 
     /// Repositions visible windows on the screen where the status menu was opened.
@@ -348,10 +383,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Opens the retained location panel so its device and simulation state survives menu dismissal.
     @objc private func showIPhoneLocation() {
         iphoneLocationWindowController.showWindow()
-    }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        menuSourceApplication = NSWorkspace.shared.frontmostApplication
     }
 
     /// Opens a retained editor instead of starting another app or replacing translation state.
@@ -426,6 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateModelMenu() {
         modelMenuItem?.title = "模型切换：\(modelSelection.provider.title)..."
+        powerPopover?.refreshCommands()
     }
 
     @objc private func showModelSelection() {

@@ -107,9 +107,13 @@ struct StatusItemTilePose {
 /// Publishes bitmap frames through NSStatusBarButton.image; no child view can steal mouse tracking.
 @MainActor
 final class StatusItemIconAnimator: NSObject {
+    /// 主题切换只使电源静态附件失效一次，不随动画帧回调。
+    var onAppearanceChange: (() -> Void)?
+    private var lastDarkAppearance: Bool?
     private weak var button: NSStatusBarButton?
     private let imageSize: CGSize
     private var frameTimer: Timer?
+    private var appearanceObservation: NSKeyValueObservation?
     private var animationStart = CACurrentMediaTime()
 
     var animationState: StatusTranslationIconState = .idle {
@@ -121,11 +125,11 @@ final class StatusItemIconAnimator: NSObject {
     }
 
     var isPreventingSleep = false {
-        didSet { updateImage() }
+        didSet { if isPreventingSleep != oldValue { updateImage() } }
     }
 
     var isSleepIndicatorBright = true {
-        didSet { updateImage() }
+        didSet { if isSleepIndicatorBright != oldValue { updateImage() } }
     }
 
     init(button: NSStatusBarButton, statusBarThickness: CGFloat) {
@@ -140,6 +144,10 @@ final class StatusItemIconAnimator: NSObject {
     func start() {
         stop()
         updateImage()
+        // 减少动态效果会停掉帧计时器，仍需通过外观事件更新静态电源图标。
+        appearanceObservation = button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in self?.updateImage() }
+        }
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(displayOptionsDidChange),
@@ -152,6 +160,8 @@ final class StatusItemIconAnimator: NSObject {
     func stop() {
         frameTimer?.invalidate()
         frameTimer = nil
+        appearanceObservation?.invalidate()
+        appearanceObservation = nil
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -173,6 +183,10 @@ final class StatusItemIconAnimator: NSObject {
     @objc private func updateImage() {
         guard let button else { return }
         let isDark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        if lastDarkAppearance != isDark {
+            lastDarkAppearance = isDark
+            onAppearanceChange?()
+        }
         button.image = image(
             at: CACurrentMediaTime() - animationStart,
             isDark: isDark,
