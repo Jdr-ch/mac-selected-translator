@@ -4,6 +4,7 @@ import AppKit
 @MainActor
 final class PowerInfoView: NSVisualEffectView {
     var onShowPowerChange: ((Bool) -> Void)?
+    var onShowPowerHistory: (([PowerHistorySample], NSView) -> Void)?
     private let percentage = NSTextField(labelWithString: "—")
     private let status = NSTextField(labelWithString: "电源状态暂不可用")
     private let adapter = NSTextField(wrappingLabelWithString: "暂不可用")
@@ -16,11 +17,13 @@ final class PowerInfoView: NSVisualEffectView {
     private let chargingValue = NSTextField(labelWithString: "—")
     private let chargingLabel = NSTextField(labelWithString: "电池充电功率")
     private let inputRows = NSStackView()
+    private let inputPowerRow = PowerMetricRowView(label: "系统输入功率")
     private var batteryRow: NSView!
     private var chargingRow: NSView!
     private let powerCheckbox = NSButton(checkboxWithTitle: "功率", target: nil, action: nil)
     private var lastPresentation: PowerPresentation?
     private var currentState = PowerState.unavailable
+    private var history: [PowerHistorySample] = []
 
     init(showPower: Bool) {
         super.init(frame: .zero)
@@ -71,13 +74,18 @@ final class PowerInfoView: NSVisualEffectView {
         inputRows.orientation = .vertical
         inputRows.alignment = .leading
         inputRows.spacing = 14
-        for (label, value) in [("供电档位", contractValue), ("系统输入电压", inputVoltageValue), ("系统输入功率", inputWattsValue)] {
+        for (label, value) in [("供电档位", contractValue), ("系统输入电压", inputVoltageValue)] {
             let row = Self.row(label: Self.secondaryLabel(label), value: value)
             inputRows.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: inputRows.widthAnchor).isActive = true
         }
+        inputPowerRow.value = inputWattsValue.stringValue
+        inputPowerRow.onActivate = { [weak self] in self?.toggleHistoryChart() }
+        inputRows.addArrangedSubview(inputPowerRow)
+        inputPowerRow.widthAnchor.constraint(equalTo: inputRows.widthAnchor).isActive = true
         stack.addArrangedSubview(inputRows)
         inputRows.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
         batteryRow = Self.row(label: Self.secondaryLabel("电池自身电压"), value: batteryVoltageValue)
         chargingLabel.font = .systemFont(ofSize: 11)
         chargingLabel.textColor = .secondaryLabelColor
@@ -102,7 +110,7 @@ final class PowerInfoView: NSVisualEffectView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// 只有可见文案变化才设置文本；电量条使用真实百分比，不制造周期动画。
-    func update(snapshot: PowerSnapshot, presentation: PowerPresentation) {
+    func update(snapshot: PowerSnapshot, presentation: PowerPresentation, history: [PowerHistorySample] = []) {
         level.fraction = (snapshot.batteryPercent ?? 0) / 100
         guard lastPresentation != presentation else { return }
         lastPresentation = presentation
@@ -113,6 +121,8 @@ final class PowerInfoView: NSVisualEffectView {
         adapterRating.stringValue = presentation.adapterRating
         adapterRating.isHidden = !presentation.showAdapter
         inputRows.isHidden = !presentation.showAdapter
+        inputPowerRow.value = presentation.inputWatts
+        inputPowerRow.isInteractive = presentation.showAdapter && snapshot.inputWatts?.isFinite == true
         batteryRow.isHidden = !presentation.showBattery
         chargingRow.isHidden = !presentation.showAdapter
         contractValue.stringValue = presentation.contract
@@ -122,7 +132,19 @@ final class PowerInfoView: NSVisualEffectView {
         chargingLabel.stringValue = presentation.state == .charging ? "电池充电功率" : "电池状态"
         chargingValue.stringValue = presentation.state == .charging ? presentation.chargingWatts : presentation.state.title
         chargingValue.toolTip = presentation.state == .charging ? "按电池包电压 × 电池电流估算；系统输入功率包含电脑运行消耗。" : nil
+        updateHistory(history)
         refreshColor()
+    }
+
+    /// 采样器可在快照未变化时追加历史点；只更新图表数据，不重复布局电源字段。
+    func updateHistory(_ history: [PowerHistorySample]) {
+        self.history = history
+    }
+
+    /// 点击输入功率行请求外置图表；图表由上层控制器锚定到主面板左侧。
+    private func toggleHistoryChart() {
+        guard inputPowerRow.isInteractive else { return }
+        onShowPowerHistory?(history, inputPowerRow)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -157,6 +179,68 @@ final class PowerInfoView: NSVisualEffectView {
         row.spacing = 5
         row.alignment = .firstBaseline
         return row
+    }
+}
+
+/// 统一承载可点击的功率指标行，保留原生文本对齐并提供键盘与辅助功能入口。
+@MainActor
+private final class PowerMetricRowView: NSView {
+    private let labelField: NSTextField
+    private let valueField: NSTextField
+    var onActivate: (() -> Void)?
+    var isInteractive = false { didSet { updateAppearance() } }
+    var value: String { get { valueField.stringValue } set { valueField.stringValue = newValue; setAccessibilityValue(newValue) } }
+    private var hovering = false { didSet { updateAppearance() } }
+
+    init(label: String) {
+        labelField = NSTextField(labelWithString: label)
+        valueField = NSTextField(labelWithString: "—")
+        super.init(frame: .zero)
+        let row = NSStackView(views: [labelField, NSView(), valueField])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.spacing = 5
+        row.alignment = .firstBaseline
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 3), row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
+        ])
+        labelField.font = .systemFont(ofSize: 11)
+        labelField.textColor = .secondaryLabelColor
+        valueField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        valueField.alignment = .right
+        valueField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(label)
+        addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(activate)))
+        updateTrackingAreas()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func keyDown(with event: NSEvent) {
+        if isInteractive, event.keyCode == 36 || event.keyCode == 49 { onActivate?() } else { super.keyDown(with: event) }
+    }
+
+    private func updateAppearance() {
+        wantsLayer = isInteractive
+        layer?.backgroundColor = hovering && isInteractive ? NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor : nil
+        layer?.cornerRadius = 4
+        setAccessibilityRole(isInteractive ? .button : .staticText)
+        needsDisplay = true
+    }
+
+    @objc private func activate() {
+        if isInteractive { onActivate?() }
     }
 }
 

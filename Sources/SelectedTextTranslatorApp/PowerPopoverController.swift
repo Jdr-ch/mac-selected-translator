@@ -6,6 +6,7 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
     var onVisibilityChange: ((Bool) -> Void)?
     var onShowPowerChange: ((Bool) -> Void)?
     private let popover = NSPopover()
+    private let historyPopover = PowerHistoryPopoverController()
     let content: PowerPopoverContentController
     private weak var statusButton: NSStatusBarButton?
     /// 仅在面板展开时监听点击；本地与全局监听分别覆盖本应用和其他应用。
@@ -31,6 +32,9 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
             }
         }
         content.info.onShowPowerChange = { [weak self] showPower in self?.onShowPowerChange?(showPower) }
+        content.info.onShowPowerHistory = { [weak self] samples, anchor in
+            self?.historyPopover.toggle(relativeTo: anchor, samples: samples)
+        }
     }
 
     /// 跟随被点击的原生按钮定位；再次点击关闭，展开时限制高度并立即启用面板采样。
@@ -50,11 +54,17 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
     /// 所有关闭路径先解除监听，避免残留回调干扰下一次展开。
     func close() {
         stopDismissalMonitoring()
+        historyPopover.close()
         popover.performClose(nil)
     }
 
-    func update(snapshot: PowerSnapshot, presentation: PowerPresentation) {
-        content.info.update(snapshot: snapshot, presentation: presentation)
+    func update(snapshot: PowerSnapshot, presentation: PowerPresentation, history: [PowerHistorySample]) {
+        content.info.update(snapshot: snapshot, presentation: presentation, history: history)
+        if !presentation.showAdapter { historyPopover.close() }
+    }
+
+    func updateHistory(_ history: [PowerHistorySample]) {
+        content.info.updateHistory(history)
     }
 
     func refreshCommands() { content.refreshCommands() }
@@ -68,6 +78,7 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
     /// 原生 transient 自动关闭也要执行相同清理，并恢复按钮与采样状态。
     func popoverDidClose(_ notification: Notification) {
         stopDismissalMonitoring()
+        historyPopover.close()
         statusButton?.highlight(false)
         onVisibilityChange?(false)
     }

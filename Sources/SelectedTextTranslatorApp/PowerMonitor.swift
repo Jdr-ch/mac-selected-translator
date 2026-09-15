@@ -9,7 +9,9 @@ final class PowerMonitor {
     /// 该私有消息表示 IORegistry 已有新电池数据，不保证所有机型支持，轮询始终保留。
     nonisolated static let batteryStatusChangedMessage: UInt32 = 0xe0024100
     var onChange: ((PowerSnapshot) -> Void)?
+    var onHistoryChange: (([PowerHistorySample]) -> Void)?
     private(set) var snapshot = PowerSnapshot()
+    private(set) var history = PowerHistory()
     private(set) var sampleCount = 0
     private(set) var interval: TimeInterval?
     private let read: @Sendable () -> PowerSnapshot
@@ -152,6 +154,10 @@ final class PowerMonitor {
                 self.isReading = false
                 self.sampleCount += 1
                 if !self.sleeping && !self.locked {
+                    if let watts = value.inputWatts,
+                       self.history.append(watts: watts, at: Date()) {
+                        self.onHistoryChange?(self.history.samples)
+                    }
                     if self.snapshot != value {
                         self.snapshot = value
                         self.onChange?(value)

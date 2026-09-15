@@ -7,6 +7,24 @@ import os
 @Suite(.serialized)
 @MainActor
 struct PowerMonitorTests {
+    @Test func powerHistoryCoalescesAndTrimsToTwoHours() {
+        var history = PowerHistory()
+        let start = Date(timeIntervalSince1970: 10_000)
+        let firstAppend = history.append(watts: 30, at: start)
+        #expect(firstAppend)
+        let coalescedAppend = history.append(watts: 31, at: start.addingTimeInterval(2))
+        #expect(coalescedAppend)
+        #expect(history.samples.count == 1)
+        #expect(history.samples[0].watts == 31)
+        let secondAppend = history.append(watts: 32, at: start.addingTimeInterval(7))
+        #expect(secondAppend)
+        #expect(history.samples.count == 2)
+        let invalidAppend = history.append(watts: .nan, at: start.addingTimeInterval(10))
+        #expect(!invalidAppend)
+        history.trim(around: start.addingTimeInterval(PowerHistory.window + 8))
+        #expect(history.samples.isEmpty)
+    }
+
     /// 固定样例仅验证单位与来源：68.2W 整机输入不能当作 25.4W 电池充电功率。
     static var registry: [String: Any] {
         ["ExternalConnected": true, "IsCharging": true, "CurrentCapacity": 68,

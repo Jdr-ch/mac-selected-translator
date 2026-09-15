@@ -165,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.updatePowerSnapshot(self.powerMonitor.snapshot)
         }
         powerMonitor.onChange = { [weak self] snapshot in self?.updatePowerSnapshot(snapshot) }
+        powerMonitor.onHistoryChange = { [weak self] history in self?.powerPopover?.updateHistory(history) }
         installStatusItemMouseMonitor()
         updateSleepPreventionUI()
         updatePowerSnapshot(powerMonitor.snapshot)
@@ -249,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updatePowerSnapshot(_ snapshot: PowerSnapshot) {
         powerPresentation = PowerPresentation(snapshot: snapshot, showPower: showMenuBarPower)
         updatePowerStatusButton()
-        powerPopover?.update(snapshot: snapshot, presentation: powerPresentation)
+        powerPopover?.update(snapshot: snapshot, presentation: powerPresentation, history: powerMonitor.history.samples)
     }
 
     /// 标题附件变化才重绘；主题改变时独立失效缓存，不扩大原动态图像的尺寸。
