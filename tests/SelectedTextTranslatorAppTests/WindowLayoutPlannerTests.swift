@@ -52,6 +52,12 @@ struct WindowLayoutPlannerTests {
         let bitmap = try #require(image.representations.first as? NSBitmapImageRep)
         #expect(bitmap.pixelsWide == 88)
         #expect(bitmap.pixelsHigh == 44)
+        // 空闲默认静止：连续两帧一致，空闲时不再逐帧重绘。
+        let idleStill = try #require(animator.image(at: 0, isDark: false, reduceMotion: false)?.tiffRepresentation)
+        let idleLater = try #require(animator.image(at: 0.8, isDark: false, reduceMotion: false)?.tiffRepresentation)
+        #expect(idleStill == idleLater)
+        // 打开互换后才恢复空闲动效，且仍受减少动态效果约束。
+        animator.idleExchangeEnabled = true
         let initial = try #require(animator.image(at: 0, isDark: false, reduceMotion: false)?.tiffRepresentation)
         let moved = try #require(animator.image(at: 0.8, isDark: false, reduceMotion: false)?.tiffRepresentation)
         #expect(initial != moved)
@@ -73,6 +79,33 @@ struct WindowLayoutPlannerTests {
             #expect(StatusItemVisualStyle.hitTarget(at: iconPoint, in: size, isPreventingSleep: true) == .menu)
             #expect(StatusItemVisualStyle.hitTarget(at: CGPoint(x: -1, y: 12), in: size, isPreventingSleep: true) == .outside)
         }
+    }
+
+    @Test
+    func statusIconBurstPaletteMatchesModuleAndFailureSemantics() {
+        #expect(StatusTranslationIconState.translating.burstStops(isDark: false).count == 2)
+        #expect(StatusTranslationIconState.restoringWorkspace.burstStops(isDark: false).count == 1)
+        #expect(StatusTranslationIconState.locating.burstStops(isDark: false).count == 1)
+        #expect(StatusTranslationIconState.failed.burstStops(isDark: false).count == 1)
+        #expect(StatusTranslationIconState.busy.burstStops(isDark: false).count == 4)
+    }
+
+    /// 失败态只在短暂抖动期间变化，停留阶段不能继续播放弧线或色散。
+    @MainActor
+    @Test
+    func statusIconFailureStopsAnimatingAfterShake() throws {
+        let item = NSStatusBar.system.statusItem(withLength: 44)
+        item.isVisible = false
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        let button = try #require(item.button)
+        let animator = StatusItemIconAnimator(button: button, statusBarThickness: 22)
+        animator.animationState = .failed
+
+        let shaking = try #require(animator.image(at: 0.1, isDark: false, reduceMotion: false)?.tiffRepresentation)
+        let settled = try #require(animator.image(at: 0.4, isDark: false, reduceMotion: false)?.tiffRepresentation)
+        let settledLater = try #require(animator.image(at: 0.6, isDark: false, reduceMotion: false)?.tiffRepresentation)
+        #expect(shaking != settled)
+        #expect(settled == settledLater)
     }
 
     @Test

@@ -3,52 +3,19 @@
 import AppKit
 import Foundation
 
-private let designSize: CGFloat = 1024
+/// 图标主图（1024×1024，圆角外已透明）由设计稿产出后放在 assets/ 下，
+/// 本脚本只负责把它高质量缩放成 macOS iconset 需要的各个尺寸。
 
-/// Converts a hexadecimal RGB value into the calibrated color used by the menu-bar mark.
-private func color(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
-    NSColor(
-        calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
-        green: CGFloat((hex >> 8) & 0xff) / 255,
-        blue: CGFloat(hex & 0xff) / 255,
-        alpha: alpha
-    )
+private func resolveMasterPath() -> String {
+    if CommandLine.arguments.count > 2 {
+        return CommandLine.arguments[2]
+    }
+    let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
+    let rootURL = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
+    return rootURL.appendingPathComponent("assets/AppIconMaster.png").path
 }
 
-/// Draws one rounded language tile with a centered glyph and a soft depth shadow.
-private func drawTile(
-    _ rect: CGRect,
-    fillColor: NSColor,
-    glyph: String,
-    glyphSize: CGFloat,
-    context: CGContext
-) {
-    context.saveGState()
-    context.setShadow(
-        offset: CGSize(width: 0, height: -18),
-        blur: 30,
-        color: color(0x102A33, alpha: 0.24).cgColor
-    )
-    fillColor.setFill()
-    NSBezierPath(roundedRect: rect, xRadius: 82, yRadius: 82).fill()
-    context.restoreGState()
-
-    let attributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: glyphSize, weight: .semibold),
-        .foregroundColor: NSColor.white
-    ]
-    let renderedGlyphSize = glyph.size(withAttributes: attributes)
-    glyph.draw(
-        at: CGPoint(
-            x: rect.midX - renderedGlyphSize.width / 2,
-            y: rect.midY - renderedGlyphSize.height / 2 + 6
-        ),
-        withAttributes: attributes
-    )
-}
-
-/// Renders the same overlapping blue and teal language cards at one iconset pixel size.
-private func renderIcon(pixelSize: Int, outputURL: URL) throws {
+private func renderIcon(pixelSize: Int, master: CGImage, outputURL: URL) throws {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
         data: nil,
@@ -65,35 +32,9 @@ private func renderIcon(pixelSize: Int, outputURL: URL) throws {
     }
 
     context.interpolationQuality = .high
-    context.scaleBy(x: CGFloat(pixelSize) / designSize, y: CGFloat(pixelSize) / designSize)
-    let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = graphicsContext
+    context.clear(CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
+    context.draw(master, in: CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
 
-    let backgroundRect = CGRect(x: 62, y: 62, width: 900, height: 900)
-    color(0xF4FAFB).setFill()
-    NSBezierPath(roundedRect: backgroundRect, xRadius: 205, yRadius: 205).fill()
-    color(0xD5E3E7).setStroke()
-    let outline = NSBezierPath(roundedRect: backgroundRect, xRadius: 205, yRadius: 205)
-    outline.lineWidth = 10
-    outline.stroke()
-
-    drawTile(
-        CGRect(x: 405, y: 408, width: 430, height: 388),
-        fillColor: color(0x00A6A6),
-        glyph: "文",
-        glyphSize: 190,
-        context: context
-    )
-    drawTile(
-        CGRect(x: 188, y: 228, width: 430, height: 388),
-        fillColor: color(0x087CF0),
-        glyph: "A",
-        glyphSize: 210,
-        context: context
-    )
-
-    NSGraphicsContext.restoreGraphicsState()
     guard let image = context.makeImage() else {
         throw NSError(domain: "AppIcon", code: 2, userInfo: [
             NSLocalizedDescriptionKey: "Unable to finalize icon bitmap"
@@ -108,9 +49,21 @@ private func renderIcon(pixelSize: Int, outputURL: URL) throws {
     try data.write(to: outputURL, options: .atomic)
 }
 
-guard CommandLine.arguments.count == 2 else {
-    FileHandle.standardError.write(Data("usage: generate_app_icon.swift <AppIcon.iconset>\n".utf8))
+guard CommandLine.arguments.count >= 2 else {
+    FileHandle.standardError.write(Data(
+        "usage: generate_app_icon.swift <AppIcon.iconset> [master.png]\n".utf8
+    ))
     exit(64)
+}
+
+let masterPath = resolveMasterPath()
+guard FileManager.default.fileExists(atPath: masterPath),
+      let masterImage = NSImage(contentsOfFile: masterPath),
+      let master = masterImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+    FileHandle.standardError.write(Data(
+        "找不到图标主图：\(masterPath)\n请先把 1024×1024 的圆角透明 PNG 放到该位置。\n".utf8
+    ))
+    exit(66)
 }
 
 let outputDirectory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -129,5 +82,9 @@ let specifications: [(String, Int)] = [
 ]
 
 for (filename, pixelSize) in specifications {
-    try renderIcon(pixelSize: pixelSize, outputURL: outputDirectory.appendingPathComponent(filename))
+    try renderIcon(
+        pixelSize: pixelSize,
+        master: master,
+        outputURL: outputDirectory.appendingPathComponent(filename)
+    )
 }
