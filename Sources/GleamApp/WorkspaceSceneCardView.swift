@@ -30,17 +30,18 @@ enum WorkspaceScenePalette {
 /// 保留原生按钮的键盘与无障碍行为，仅绘制设计稿中的圆角按钮或蓝色文字操作。
 @MainActor
 final class WorkspaceSceneButton: NSButton {
-    enum Style { case secondary, primary, link }
+    enum Style { case secondary, primary, link, danger }
     var style: Style = .secondary { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
     override var isEnabled: Bool { didSet { needsDisplay = true } }
     override var intrinsicContentSize: NSSize {
-        let width = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: style == .link ? 12 : 13)]).width
-        return NSSize(width: ceil(width) + (style == .link ? 12 : 22), height: style == .link ? 26 : 30)
+        let textStyle = style == .link || style == .danger
+        let width = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: textStyle ? 12 : 13)]).width
+        return NSSize(width: ceil(width) + (textStyle ? 12 : 22), height: textStyle ? 26 : 30)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let alpha: CGFloat = isEnabled ? (isHighlighted ? 0.75 : 1) : 0.42
-        if style != .link {
+        if style != .link && style != .danger {
             let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
             (style == .primary ? WorkspaceScenePalette.accent : WorkspaceScenePalette.content).withAlphaComponent(alpha).setFill()
             path.fill()
@@ -48,8 +49,10 @@ final class WorkspaceSceneButton: NSButton {
             path.lineWidth = 1
             path.stroke()
         }
-        let color: NSColor = style == .primary ? .white : (style == .link ? WorkspaceScenePalette.link : WorkspaceScenePalette.text)
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: style == .link ? 12 : 13),
+        let textStyle = style == .link || style == .danger
+        let color: NSColor = style == .primary ? .white : (style == .danger ? WorkspaceScenePalette.failure
+            : (style == .link ? WorkspaceScenePalette.link : WorkspaceScenePalette.text))
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: textStyle ? 12 : 13),
             .foregroundColor: color.withAlphaComponent(alpha)]
         let size = (title as NSString).size(withAttributes: attributes)
         (title as NSString).draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attributes)
@@ -135,19 +138,21 @@ final class WorkspaceDesktopCardView: NSView {
     private let captureButton = WorkspaceSceneButton(title: "采集", target: nil, action: nil)
     private let saveButton = WorkspaceSceneButton(title: "保存", target: nil, action: nil)
     private let restoreButton = WorkspaceSceneButton(title: "恢复", target: nil, action: nil)
+    private let deleteButton = WorkspaceSceneButton(title: "删除", target: nil, action: nil)
     private var enabled = true
     var onToggle: (() -> Void)?
     var onFocus: (() -> Void)?
     var onCapture: (() -> Void)?
     var onSave: (() -> Void)?
     var onRestore: (() -> Void)?
+    var onDelete: (() -> Void)?
     override var isFlipped: Bool { true }
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 90) }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         addSubview(background)
-        for view in [checkbox, titleLabel, subtitleLabel, chips, countLabel, statusLabel, captureButton, saveButton, restoreButton] { addSubview(view) }
+        for view in [checkbox, titleLabel, subtitleLabel, chips, countLabel, statusLabel, captureButton, saveButton, restoreButton, deleteButton] { addSubview(view) }
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.textColor = WorkspaceScenePalette.text
         for label in [subtitleLabel, countLabel] { label.font = .systemFont(ofSize: 11); label.textColor = WorkspaceScenePalette.secondary }
@@ -156,12 +161,14 @@ final class WorkspaceDesktopCardView: NSView {
         for label in [titleLabel, subtitleLabel, countLabel, statusLabel] { label.lineBreakMode = .byTruncatingTail }
         checkbox.target = self
         checkbox.action = #selector(toggle)
-        for (button, action) in [(captureButton, #selector(capture)), (saveButton, #selector(save)), (restoreButton, #selector(restore))] {
+        for (button, action) in [(captureButton, #selector(capture)), (saveButton, #selector(save)), (restoreButton, #selector(restore)),
+                                 (deleteButton, #selector(delete))] {
             button.target = self
             button.action = action
             button.style = .link
             button.isBordered = false
         }
+        deleteButton.style = .danger
         setAccessibilityRole(.group)
     }
 
@@ -170,13 +177,14 @@ final class WorkspaceDesktopCardView: NSView {
     /// 行显示依赖桌面快照与本次操作阶段，不在绘制或勾选时采集真实窗口。
     func configure(desktop: WorkspaceDesktop, windows: [WorkspaceWindow], displayName: String,
                    saved: Bool, draft: Bool, selected: Bool, activity: WorkspaceDesktopActivity,
-                   busy: Bool, canCapture: Bool, canSave: Bool, canRestore: Bool, outcomes: [WorkspaceOutcome] = []) {
+                   busy: Bool, canCapture: Bool, canSave: Bool, canRestore: Bool, canDelete: Bool = false,
+                   outcomes: [WorkspaceOutcome] = []) {
         enabled = !busy
         checkbox.state = selected ? .on : .off
         checkbox.isEnabled = !busy
-        checkbox.setAccessibilityLabel("勾选\(desktop.label)")
-        titleLabel.stringValue = desktop.label
-        subtitleLabel.stringValue = displayName + " · " + (draft ? "待保存" : (saved ? "已保存" : "尚未保存"))
+        checkbox.setAccessibilityLabel("勾选\(desktop.identityLabel(displayName: displayName))")
+        titleLabel.stringValue = desktop.identityLabel(displayName: displayName)
+        subtitleLabel.stringValue = draft ? "待保存" : (saved ? "已保存" : "尚未保存")
         subtitleLabel.toolTip = subtitleLabel.stringValue
         chips.configure(windows.map { entry in
             WorkspaceWindowPresentation(entry, outcome: outcomes.first { $0.windowID == entry.id })
@@ -191,8 +199,10 @@ final class WorkspaceDesktopCardView: NSView {
         captureButton.isEnabled = canCapture
         saveButton.isEnabled = canSave
         restoreButton.isEnabled = canRestore
+        deleteButton.isEnabled = canDelete
+        deleteButton.toolTip = canDelete ? "删除该桌面保存的窗口信息" : "当前桌面没有已保存的窗口信息"
         background.configure(running: activity.running)
-        setAccessibilityLabel("\(desktop.label)，\(activity.message)")
+        setAccessibilityLabel("\(desktop.identityLabel(displayName: displayName))，\(activity.message)")
         needsLayout = true
     }
 
@@ -200,8 +210,8 @@ final class WorkspaceDesktopCardView: NSView {
         super.layout()
         background.frame = bounds
         checkbox.frame = NSRect(x: 14, y: 34, width: 18, height: 22)
-        titleLabel.frame = NSRect(x: 41, y: 23, width: 118, height: 19)
-        subtitleLabel.frame = NSRect(x: 41, y: 46, width: 126, height: 17)
+        titleLabel.frame = NSRect(x: 41, y: 23, width: 136, height: 19)
+        subtitleLabel.frame = NSRect(x: 41, y: 46, width: 136, height: 17)
         let right: CGFloat = 155
         let middleX: CGFloat = 182
         let middleWidth = max(bounds.width - middleX - right - 24, 80)
@@ -209,7 +219,8 @@ final class WorkspaceDesktopCardView: NSView {
         let summaryY = (bounds.height - chipHeight - 20) / 2
         chips.frame = NSRect(x: middleX, y: summaryY, width: middleWidth, height: chipHeight)
         countLabel.frame = NSRect(x: middleX, y: summaryY + chipHeight + 3, width: middleWidth, height: 16)
-        statusLabel.frame = NSRect(x: bounds.width - right - 14, y: 19, width: right, height: 18)
+        statusLabel.frame = NSRect(x: bounds.width - right - 14, y: 19, width: 105, height: 18)
+        deleteButton.frame = NSRect(x: bounds.width - 54, y: 17, width: 40, height: 24)
         var x = bounds.width - 14 - 3 * 39
         for button in [captureButton, saveButton, restoreButton] {
             button.frame = NSRect(x: x, y: 45, width: 39, height: 27)
@@ -238,4 +249,6 @@ final class WorkspaceDesktopCardView: NSView {
     @objc private func capture() { onCapture?() }
     @objc private func save() { onSave?() }
     @objc private func restore() { onRestore?() }
+    /// 只回调桌面保存信息删除请求，确认和实际写盘由面板控制器处理。
+    @objc private func delete() { onDelete?() }
 }

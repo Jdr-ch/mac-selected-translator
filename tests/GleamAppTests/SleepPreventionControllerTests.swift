@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 struct SleepPreventionControllerTests {
     @MainActor

@@ -9,19 +9,19 @@
 菜单栏与动画：
 
 ```bash
-swift test --filter 'SelectedTextTranslatorAppTests.WindowLayoutPlannerTests/(testStatusItemVisualStyleCombinesTranslationIconAndSleepLight|statusIcon)'
+swift test --filter 'GleamAppTests.WindowLayoutPlannerTests/(testStatusItemVisualStyleCombinesTranslationIconAndSleepLight|statusIcon)'
 ```
 
 候选行高度：
 
 ```bash
-swift test --filter 'SelectedTextTranslatorAppTests.TranslationResultPresentationTests/candidateRowsUseCompactHeight'
+swift test --filter 'GleamAppTests.TranslationResultPresentationTests/candidateRowsUseCompactHeight'
 ```
 
 涉及结果解析或候选复制协议时，使用整个直接相关的 `TranslationResultPresentationTests`：
 
 ```bash
-swift test --filter 'SelectedTextTranslatorAppTests.TranslationResultPresentationTests'
+swift test --filter 'GleamAppTests.TranslationResultPresentationTests'
 ```
 
 - 以上名称来自 2026-09-05 源码，后续可随测试重命名调整。出现 `No matching test cases were run` 或最后 `Test run with 0 tests` 时，先用 `swift test list` 获取精确名称再修正筛选。
@@ -43,7 +43,7 @@ swift test --filter 'SelectedTextTranslatorAppTests.TranslationResultPresentatio
 
 ## 构建：复用项目现有脚本
 
-先读 `scripts/build_app.sh`，确认生成目录仍是项目内的 `dist/Selected Text Translator.app`，再运行：
+先读 `scripts/build_app.sh`，确认生成目录仍是项目内的 `dist/拾光.app`，再运行：
 
 ```bash
 ./scripts/build_app.sh
@@ -53,19 +53,19 @@ swift test --filter 'SelectedTextTranslatorAppTests.TranslationResultPresentatio
 
 回读而不是凭记忆假定：
 
-- `CFBundleIdentifier` 应为 `com.local.selected-text-translator`，可执行文件为 `SelectedTextTranslatorApp`。
+- `CFBundleIdentifier` 应为 `com.local.gleam`，可执行文件为 `GleamApp`。
 - `CFBundleIconFile` 应指向 `AppIcon`，且 `Contents/Resources/AppIcon.icns` 确实存在。
 - `LSUIElement` 是后台菜单栏应用配置；没有普通主窗口不等于没有运行。
-- `TranslatorProjectRoot` 必须指向本轮使用的真实项目根。仓库移动时重新构建，不能复制仍引用旧路径的包冒充新安装。
+- `GleamProjectRoot` 必须指向本轮使用的真实项目根。仓库移动时重新构建，不能复制仍引用旧路径的包冒充新安装。
 - App 图标与菜单栏图标共享 A/文的视觉语言，但由不同代码生成；修改其中一个时，按用户范围决定是否同步另一个。
 
 ## 替换：精确目标与可回退操作
 
 用户要求“替换当前 App”时完成以下顺序；只有“构建”则止于产物，不擅自退出或覆盖已安装 App。
 
-1. 用只读检查解析当前安装路径、Bundle ID、运行进程的完整路径／PID、目标目录及备份目录。默认安装路径为 `/Applications/Selected Text Translator.app`，但以本机当前事实和用户指定为准。
+1. 用只读检查解析当前安装路径、Bundle ID、运行进程的完整路径／PID、目标目录及备份目录。默认安装路径为 `/Applications/拾光.app`，但以本机当前事实和用户指定为准。
 2. 构建成功后先验证 dist 包签名与所需资源。新包未通过时不动当前安装。
-3. 选择不存在的精确备份名，例如废纸篓下 `Selected Text Translator-before-<本次本地日期时间>.app`；实际执行前展开并回读。不要复用本会话旧 PID、日期或备份路径，不覆盖已有备份。
+3. 选择不存在的精确备份名，例如废纸篓下 `拾光-before-<本次本地日期时间>.app`；实际执行前展开并回读。不要复用本会话旧 PID、日期或备份路径，不覆盖已有备份。
 4. 只终止已核实属于该安装包的进程，优先正常退出／`TERM`，再确认其退出。注意退出会释放当前禁止休眠 activity 并关闭本 App 所有窗口；不要广泛 `pkill` Python、Swift 或其他应用。
 5. 把旧 App 移到该备份路径，再用 `ditto` 将 dist 包复制到精确安装路径。遇到失败先保留备份并报告或回滚，不进行递归强删。
 6. 启动精确的新安装路径，然后核对签名、可执行文件 SHA-256、plist 项目根及进程完整路径。只看到 `open` 成功不足以判定进程已正常运行。
@@ -75,11 +75,11 @@ swift test --filter 'SelectedTextTranslatorAppTests.TranslationResultPresentatio
 常用只读校验（路径只在与本轮目标一致时使用）：
 
 ```bash
-codesign --verify --deep --strict --verbose=2 'dist/Selected Text Translator.app'
-codesign --verify --deep --strict --verbose=2 '/Applications/Selected Text Translator.app'
-shasum -a 256 'dist/Selected Text Translator.app/Contents/MacOS/SelectedTextTranslatorApp' '/Applications/Selected Text Translator.app/Contents/MacOS/SelectedTextTranslatorApp'
-/usr/libexec/PlistBuddy -c 'Print :TranslatorProjectRoot' '/Applications/Selected Text Translator.app/Contents/Info.plist'
-ps -ax -o pid=,comm= | rg 'SelectedTextTranslatorApp$'
+codesign --verify --deep --strict --verbose=2 'dist/拾光.app'
+codesign --verify --deep --strict --verbose=2 '/Applications/拾光.app'
+shasum -a 256 'dist/拾光.app/Contents/MacOS/GleamApp' '/Applications/拾光.app/Contents/MacOS/GleamApp'
+/usr/libexec/PlistBuddy -c 'Print :GleamProjectRoot' '/Applications/拾光.app/Contents/Info.plist'
+ps -ax -o pid=,comm= | rg 'GleamApp$'
 ```
 
 ## 登录自启动与真实验收

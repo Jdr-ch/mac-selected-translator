@@ -17,13 +17,13 @@ struct AppConfiguration {
         bundle: Bundle = .main
     ) {
         let rawBackendURL = environment["TRANSLATOR_BACKEND_URL"]
-            ?? bundle.object(forInfoDictionaryKey: "TranslatorBackendURL") as? String
+            ?? bundle.object(forInfoDictionaryKey: "GleamBackendURL") as? String
             ?? "http://127.0.0.1:8765"
 
         self.backendBaseURL = Self.normalizedBackendURL(from: rawBackendURL)
 
         let rawProjectRoot = environment["TRANSLATOR_PROJECT_ROOT"]
-            ?? bundle.object(forInfoDictionaryKey: "TranslatorProjectRoot") as? String
+            ?? bundle.object(forInfoDictionaryKey: "GleamProjectRoot") as? String
         if let rawProjectRoot, !rawProjectRoot.isEmpty {
             self.projectRoot = URL(fileURLWithPath: rawProjectRoot, isDirectory: true)
         } else {

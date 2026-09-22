@@ -1,7 +1,7 @@
 import AppKit
 
 @main
-struct SelectedTextTranslatorMain {
+struct GleamMain {
     @MainActor
     static func main() {
         let app = NSApplication.shared

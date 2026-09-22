@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# 钥匙串标识刻意保留旧名：这两个字符串就是已存 API Key 的检索键，
+# 改成新名会读不到密钥，用户需要重新导入。应用改名不涉及此处。
 TRANSLATOR_KEYCHAIN_SERVICE="com.local.selected-text-translator.dashscope-api-key"
 TRANSLATOR_KEYCHAIN_ACCOUNT="selected-text-translator"
 

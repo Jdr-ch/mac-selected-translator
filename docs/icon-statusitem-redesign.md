@@ -1,8 +1,8 @@
 # 图标与菜单栏动效改造清单
 
-> 项目：Mac Selected Translator  
+> 项目：拾光 Gleam（目录仍为 mac-selected-translator）  
 > 日期：2026-09-18  
-> 涉及文件：`scripts/generate_app_icon.swift`、`Sources/SelectedTextTranslatorApp/StatusItemIconView.swift`
+> 涉及文件：`scripts/generate_app_icon.swift`、`Sources/GleamApp/StatusItemIconView.swift`
 
 ---
 
@@ -81,7 +81,7 @@
 
 ## 三、代码改动清单
 
-全部集中在 `Sources/SelectedTextTranslatorApp/StatusItemIconView.swift`。
+全部集中在 `Sources/GleamApp/StatusItemIconView.swift`。
 
 ### 3.1 `StatusItemVisualStyle` 新增常量
 

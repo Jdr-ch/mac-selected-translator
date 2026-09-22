@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Locks the user-visible geometry rules without moving real desktop windows during tests.
 struct WindowLayoutPlannerTests {

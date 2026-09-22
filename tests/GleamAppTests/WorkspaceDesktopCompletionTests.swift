@@ -1,6 +1,6 @@
 import ApplicationServices
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 完成钩子注入模拟对齐动作，核对触发与窗口范围，不移动任何真实窗口。
 @MainActor

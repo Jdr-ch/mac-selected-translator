@@ -92,7 +92,9 @@ final class WorkspaceRestoreRunner {
             }
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = false
-            configuration.arguments = ["--profile-directory=\(profileDirectory)"]
+            if !profileDirectory.isEmpty {
+                configuration.arguments = ["--profile-directory=\(profileDirectory)"]
+            }
             _ = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
             // 每次观察都重新解析原资料的有效连接，避免扩展重载后永远等待旧令牌。
             profile = try await waitFor(timeout: 20, failure: "等待 Chrome 资料（\(profileDirectory)）连接超时，请检查工作场景助手是否已启用。") {

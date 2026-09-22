@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Checks local recall with isolated preferences and native controls, without opening the installed app.
 struct TranslationHistoryTests {

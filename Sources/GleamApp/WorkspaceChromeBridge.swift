@@ -34,6 +34,11 @@ final class WorkspaceChromeBridge {
         return directory
     }
 
+    /// 资料目录只用于令牌失效后的重新启动；当前已有唯一在线扩展时，采集不应因配置文件不可读而失败。
+    func installedProfileDirectoryIfAvailable() -> String? {
+        try? installedProfileDirectory()
+    }
+
     /// 原连接失效时，仅在唯一连接和唯一安装目录均指向原资料时重新绑定；无连接返回 nil 供启动后等待。
     func restorationProfile(savedProfile: String, profileDirectory: String) throws -> String? {
         let profiles = connectedProfiles()
@@ -42,8 +47,12 @@ final class WorkspaceChromeBridge {
         guard profiles.count == 1, let profile = profiles.first else {
             throw WorkspaceError.message("原 Chrome 连接已失效，当前有多个资料连接，无法确定恢复目标。请只在原资料中启用工作场景助手。")
         }
-        guard try installedProfileDirectory() == profileDirectory else {
-            throw WorkspaceError.message("当前扩展所属的 Chrome 资料与保存场景不同，请在原资料（\(profileDirectory)）中启用工作场景助手。")
+        // 目录为空表示采集时 Chrome 配置文件不可读，但唯一在线令牌仍能确认当前资料。
+        // 只有保存过目录时才做目录交叉校验，避免把可用的扩展连接误报成缺少扩展。
+        if !profileDirectory.isEmpty {
+            guard try installedProfileDirectory() == profileDirectory else {
+                throw WorkspaceError.message("当前扩展所属的 Chrome 资料与保存场景不同，请在原资料（\(profileDirectory)）中启用工作场景助手。")
+            }
         }
         // 扩展本地存储重建后令牌可能变化；这里只选择本次连接，不改写用户保存的场景。
         return profile

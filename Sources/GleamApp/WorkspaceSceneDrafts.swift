@@ -8,6 +8,12 @@ struct WorkspaceDesktopDraft {
     var profileDirectory: String = ""
 }
 
+/// 记录单桌面保存是否包含待补充窗口，控制器用它更新卡片提示而不丢失已写入结果。
+struct WorkspaceSceneSaveResult {
+    var incompleteCount: Int = 0
+    var totalCount: Int = 0
+}
+
 /// 保存模板与草稿分开管理，恢复始终读取 saved，其他桌面的未保存修改不会阻止恢复。
 struct WorkspaceSceneDrafts {
     var saved: WorkspaceScene?
@@ -23,7 +29,7 @@ struct WorkspaceSceneDrafts {
         drafts[key]?.windows ?? saved?.windows.filter { $0.desktop.selectionKey == key } ?? []
     }
 
-    /// 桌面级缺项清单始终带上窗口身份，供采集提示、保存拦截和详情使用同一份说明。
+    /// 桌面级缺项清单始终带上窗口身份，供采集提示、保存结果和详情使用同一份说明。
     func issues(for key: String) -> [String] {
         windows(for: key).filter { !$0.issues.isEmpty }.map { "• \($0.label)：\($0.issues.joined(separator: "；"))" }
     }
@@ -45,27 +51,60 @@ struct WorkspaceSceneDrafts {
     }
 
     /// 仅合并指定桌面；写盘成功后才清理该草稿，失败时保留磁盘模板和全部待保存修改。
-    mutating func save(_ key: String, to store: WorkspaceSceneStore) throws {
-        guard let draft = drafts[key] else { return }
-        guard draft.windows.allSatisfy({ $0.issues.isEmpty }) else {
+    /// 面板可显式保留待补充窗口，让桌面与原生窗口布局先落盘，后续重新采集再覆盖这些条目。
+    mutating func save(_ key: String, to store: WorkspaceSceneStore,
+                       allowingIncomplete: Bool = false) throws -> WorkspaceSceneSaveResult {
+        guard let draft = drafts[key] else { return WorkspaceSceneSaveResult() }
+        let incompleteCount = draft.windows.filter { !$0.issues.isEmpty }.count
+        guard allowingIncomplete || incompleteCount == 0 else {
             throw WorkspaceError.message("\(draft.desktop.label)需要补充：\n" + issues(for: key).joined(separator: "\n"))
         }
         var merged = saved ?? WorkspaceScene(profileToken: "", chromeProfileDirectory: "", windows: [])
         let retained = merged.windows.filter { $0.desktop.selectionKey != key }
         if draft.windows.contains(where: { $0.chrome != nil }) {
-            guard !draft.profileToken.isEmpty, !draft.profileDirectory.isEmpty else {
-                throw WorkspaceError.message("\(draft.desktop.label)缺少 Chrome 资料信息，请重新采集。")
+            guard !draft.profileToken.isEmpty else {
+                throw WorkspaceError.message("\(draft.desktop.label)缺少 Chrome 扩展连接信息，请重新采集。")
             }
-            guard !retained.contains(where: { $0.chrome != nil }) || merged.chromeProfileDirectory == draft.profileDirectory else {
+            guard !retained.contains(where: { $0.chrome != nil })
+                    || merged.chromeProfileDirectory.isEmpty
+                    || draft.profileDirectory.isEmpty
+                    || merged.chromeProfileDirectory == draft.profileDirectory else {
                 throw WorkspaceError.message("所选桌面的 Chrome 资料与其他已保存桌面不同，请使用同一浏览器资料。")
             }
             merged.profileToken = draft.profileToken
-            merged.chromeProfileDirectory = draft.profileDirectory
+            if !draft.profileDirectory.isEmpty {
+                merged.chromeProfileDirectory = draft.profileDirectory
+            }
         }
         merged.desktops = merged.savedDesktops.filter { $0.selectionKey != key } + [draft.desktop]
-        merged.windows = (retained + draft.windows).sorted { $0.desktop.ordinal < $1.desktop.ordinal }
+        merged.windows = (retained + draft.windows).sorted {
+            $0.desktop.displayID == $1.desktop.displayID
+                ? $0.desktop.ordinal < $1.desktop.ordinal
+                : $0.desktop.displayID < $1.desktop.displayID
+        }
         merged.savedAt = Date()
-        try store.save(merged)
+        try store.save(merged, allowingIncomplete: allowingIncomplete)
+        saved = merged
+        drafts.removeValue(forKey: key)
+        return WorkspaceSceneSaveResult(incompleteCount: incompleteCount, totalCount: draft.windows.count)
+    }
+
+    /// 删除一个桌面的保存模板及其窗口；仅写场景文件，不删除系统桌面或真实窗口。
+    mutating func deleteDesktop(_ key: String, from store: WorkspaceSceneStore) throws {
+        let hasSavedDesktop = saved?.savedDesktops.contains(where: { $0.selectionKey == key }) == true
+        guard hasSavedDesktop else {
+            drafts.removeValue(forKey: key)
+            return
+        }
+        guard var merged = saved else { return }
+        merged.desktops = merged.savedDesktops.filter { $0.selectionKey != key }
+        merged.windows.removeAll { $0.desktop.selectionKey == key }
+        if !merged.windows.contains(where: { $0.chrome != nil }) {
+            merged.profileToken = ""
+            merged.chromeProfileDirectory = ""
+        }
+        merged.savedAt = Date()
+        try store.save(merged, allowingIncomplete: true)
         saved = merged
         drafts.removeValue(forKey: key)
     }
@@ -85,7 +124,7 @@ struct WorkspaceSceneDrafts {
             merged.windows[index].desktop = target
         }
         merged.savedAt = Date()
-        try store.save(merged)
+        try store.save(merged, allowingIncomplete: true)
         saved = merged
     }
 }

@@ -15,8 +15,10 @@ final class WorkspaceSceneController {
     let store: WorkspaceSceneStore
     var library = WorkspaceSceneDrafts()
     private(set) var currentDesktops: [WorkspaceDesktop] = []
-    /// 以显示器与桌面名称保存本次面板选择；首次加载默认勾选全部已保存桌面。
+    /// 面板选择使用显示器和 Space UUID；ordinal 只参与当前清单排序，不参与选择或恢复匹配。
     var selectedKeys: Set<String> = []
+    /// 保存桌面缺失时，记录本次恢复为它实际分配的空 Space，避免新 Space 在列表中重复出现。
+    private var runtimeTargets: [String: WorkspaceDesktop] = [:]
     private(set) var activities: [String: WorkspaceDesktopActivity] = [:]
     private(set) var outcomes: [WorkspaceOutcome] = []
     /// 仅恢复失败进入重试范围，采集和保存错误不能被误当作可重试的恢复结果。
@@ -27,12 +29,14 @@ final class WorkspaceSceneController {
 
     init(store: WorkspaceSceneStore = WorkspaceSceneStore()) { self.store = store }
 
-    /// 已删除的保存桌面仍保留在清单中；新建桌面立即可选，不会改变已有勾选。
+    /// 保存模板与本次恢复实际占用的 Space 共用一个逻辑卡片；未关联的当前桌面仍可直接采集。
     var desktops: [WorkspaceDesktop] {
         var seen: Set<String> = []
-        return (currentDesktops + library.drafts.values.map(\.desktop) + (library.saved?.savedDesktops ?? []))
+        let assignedSpaceIDs = Set(runtimeTargets.values.map(\.spaceID))
+        let unassignedCurrent = currentDesktops.filter { !assignedSpaceIDs.contains($0.spaceID) }
+        return (unassignedCurrent + library.drafts.values.map(\.desktop) + (library.saved?.savedDesktops ?? []))
             .filter { seen.insert($0.selectionKey).inserted }
-            .sorted { $0.ordinal == $1.ordinal ? $0.displayID < $1.displayID : $0.ordinal < $1.ordinal }
+            .sorted { $0.displayID == $1.displayID ? $0.ordinal < $1.ordinal : $0.displayID < $1.displayID }
     }
 
     var savedKeys: Set<String> { Set(library.saved?.savedDesktops.map(\.selectionKey) ?? []) }
@@ -43,16 +47,22 @@ final class WorkspaceSceneController {
         do {
             library.saved = try store.load()
             selectedKeys = savedKeys
-            if let saved = library.saved { status = "已保存 \(saved.savedDesktops.count) 个桌面、\(saved.windows.count) 个窗口。" }
+            if let saved = library.saved {
+                let incomplete = saved.windows.filter { !$0.issues.isEmpty }.count
+                status = "已保存 \(saved.savedDesktops.count) 个桌面、\(saved.windows.count) 个窗口。"
+                    + (incomplete > 0 ? "其中 \(incomplete) 个窗口待补充。" : "")
+            }
         } catch { status = error.localizedDescription }
         refreshDesktops()
     }
 
-    /// 打开面板或点击刷新时读取桌面清单，捕获用户新增或删除桌面后的名称变化。
+    /// 打开面板或点击刷新时读取桌面清单；已删除的运行时 Space 解除关联，避免继续把窗口送入失效目标。
     func refreshDesktops() {
         guard !busy else { return }
         do {
             currentDesktops = try catalog.desktop.desktops()
+            let currentSpaceIDs = Set(currentDesktops.map(\.spaceID))
+            runtimeTargets = runtimeTargets.filter { currentSpaceIDs.contains($0.value.spaceID) }
             selectedKeys.formIntersection(Set(desktops.map(\.selectionKey)))
         }
         catch { status = error.localizedDescription }
@@ -67,14 +77,35 @@ final class WorkspaceSceneController {
             return WorkspaceDesktopActivity(message: count > 0 ? "\(count) 个窗口待补充" : "待保存", failed: count > 0)
         }
         if savedKeys.contains(key) {
-            return WorkspaceDesktopActivity(message: currentDesktops.contains(where: { $0.selectionKey == key }) ? "已保存" : "恢复时补建／重绑")
+            let isCurrentlyAvailable = runtimeTargets[key] != nil || currentDesktops.contains { $0.selectionKey == key }
+            let incomplete = library.windows(for: key).filter { !$0.issues.isEmpty }.count
+            if incomplete > 0 {
+                return WorkspaceDesktopActivity(message: "已保存 · \(incomplete) 个窗口待补充", failed: true)
+            }
+            return WorkspaceDesktopActivity(message: isCurrentlyAvailable ? "已保存" : "恢复时使用空桌面／新建")
         }
         return WorkspaceDesktopActivity(message: "尚未采集")
     }
 
-    func canCapture(_ key: String) -> Bool { !busy && currentDesktops.contains { $0.selectionKey == key } }
+    func canCapture(_ key: String) -> Bool {
+        !busy && (runtimeTargets[key] != nil || currentDesktops.contains { $0.selectionKey == key })
+    }
     func canSave(_ key: String) -> Bool { !busy && library.drafts[key] != nil }
     func canRestore(_ key: String) -> Bool { !busy && savedKeys.contains(key) }
+    /// 删除按钮只对已有保存模板或未保存草稿启用，避免把普通当前桌面误当成可删除对象。
+    func canDelete(_ key: String) -> Bool { !busy && (savedKeys.contains(key) || library.drafts[key] != nil) }
+
+    /// 将保存模板身份与当前实际 Space 合并，采集后仍写回原桌面卡片而不会产生重复身份。
+    private func captureDesktop(for key: String) -> WorkspaceDesktop? {
+        guard let runtime = runtimeTargets[key] ?? currentDesktops.first(where: { $0.selectionKey == key }) else { return nil }
+        if let saved = library.saved?.savedDesktops.first(where: { $0.selectionKey == key }) {
+            return saved.withRuntime(runtime)
+        }
+        if let draft = library.drafts[key]?.desktop {
+            return draft.withRuntime(runtime)
+        }
+        return runtime
+    }
 
     /// 一次读取跨桌面窗口，结果按所选桌面分别更新草稿；其他桌面的草稿和模板保持原样。
     func capture(keys: Set<String>? = nil) async {
@@ -88,7 +119,9 @@ final class WorkspaceSceneController {
         defer { busy = false; onChange?() }
         do {
             currentDesktops = try catalog.desktop.desktops()
-            let targets = currentDesktops.filter { requested.contains($0.selectionKey) }
+            let currentSpaceIDs = Set(currentDesktops.map(\.spaceID))
+            runtimeTargets = runtimeTargets.filter { currentSpaceIDs.contains($0.value.spaceID) }
+            let targets = requested.compactMap { captureDesktop(for: $0) }
             let targetKeys = Set(targets.map(\.selectionKey))
             for key in requested.subtracting(targetKeys) {
                 activities[key] = WorkspaceDesktopActivity(message: "桌面不存在，请先新建或重新绑定", failed: true)
@@ -109,7 +142,9 @@ final class WorkspaceSceneController {
                         throw WorkspaceError.message("请只在要保存的 Chrome 资料中启用工作场景助手，然后重新采集。")
                     }
                     profile = connected
-                    directory = try bridge.installedProfileDirectory()
+                    // Chrome 的 Secure Preferences 可能暂时被浏览器占用或受系统隐私策略保护；
+                    // 已有唯一在线扩展令牌时仍可完整采集窗口，资料目录仅供后续令牌失效时重启 Chrome。
+                    directory = bridge.installedProfileDirectoryIfAvailable() ?? ""
                     let snapshots = try await bridge.capture(profile: profile)
                     // Chrome 匹配必须使用所有桌面的候选，不能因只勾选一个桌面而错误匹配同名窗口。
                     for var chrome in snapshots {
@@ -162,23 +197,39 @@ final class WorkspaceSceneController {
         }
     }
 
-    /// 所选桌面各自保存；某桌面有未补齐窗口时不阻止其他完整桌面保存。
+    /// 所选桌面各自保存；待补充窗口随桌面布局一起落盘，恢复时仍会单项跳过并提示。
     func save(keys: Set<String>? = nil) {
         guard !busy else { return }
         let requested = keys ?? selectedKeys
         var savedCount = 0
         var failedCount = 0
+        var partialDesktopCount = 0
+        var incompleteWindowCount = 0
         for key in requested.sorted() where library.drafts[key] != nil {
             do {
-                try library.save(key, to: store)
-                activities[key] = WorkspaceDesktopActivity(message: "已保存")
+                let result = try library.save(key, to: store, allowingIncomplete: true)
+                if result.incompleteCount > 0 {
+                    partialDesktopCount += 1
+                    incompleteWindowCount += result.incompleteCount
+                    activities[key] = WorkspaceDesktopActivity(
+                        message: "已保存 · \(result.incompleteCount) 个窗口待补充", failed: true)
+                } else {
+                    activities[key] = WorkspaceDesktopActivity(message: "已保存")
+                }
                 savedCount += 1
             } catch {
                 activities[key] = WorkspaceDesktopActivity(message: error.localizedDescription, failed: true)
                 failedCount += 1
             }
         }
-        status = "已保存 \(savedCount) 个桌面" + (failedCount > 0 ? "，\(failedCount) 个桌面需要处理。" : "。")
+        status = "已保存 \(savedCount) 个桌面"
+        if partialDesktopCount > 0 {
+            status += "，\(partialDesktopCount) 个桌面保留 \(incompleteWindowCount) 个待补充窗口"
+        }
+        if failedCount > 0 {
+            status += "，\(failedCount) 个桌面保存失败"
+        }
+        status += "。"
         onChange?()
     }
 
@@ -205,14 +256,26 @@ final class WorkspaceSceneController {
                     self.activities[desktop.selectionKey] = WorkspaceDesktopActivity(message: "正在补建桌面…", running: true)
                 }
                 self.onChange?()
+            }, empty: { topology in
+                let occupied = try self.catalog.occupiedSpaceIDs(in: topology)
+                return Set(topology.map(\.spaceID)).subtracting(occupied)
             })
         await creation.finish()
         if let current = try? catalog.desktop.desktops() { currentDesktops = current }
+        for desktop in targets {
+            if let result = prepared[desktop.selectionKey], let target = try? result.get() {
+                runtimeTargets[desktop.selectionKey] = target
+            }
+        }
         let completion = WorkspaceDesktopCompletion()
         // 完成钩子在每个桌面的最后一个窗口结束时触发；其他桌面仍可继续恢复。
         func finishDesktop(_ desktop: WorkspaceDesktop) async {
             await completion.finish(desktop, windows: scene.windows, outcomes: outcomes, align: {
-                try await WorkspaceDesktopAlignment.align(desktop, windows: scene.windows, outcomes: self.outcomes)
+                guard let preparedTarget = prepared[desktop.selectionKey] else {
+                    throw WorkspaceError.message("未准备好\(desktop.label)，请重试。")
+                }
+                try await WorkspaceDesktopAlignment.align(desktop, target: preparedTarget.get(),
+                    windows: scene.windows, outcomes: self.outcomes)
             }, update: { activity in
                 self.activities[desktop.selectionKey] = activity
                 self.onChange?()
@@ -273,6 +336,22 @@ final class WorkspaceSceneController {
         onChange?()
     }
 
+    /// 删除列表中的整桌面保存信息；真实窗口和系统桌面保持不变，删除成功后当前 Space 回到可采集状态。
+    func deleteDesktop(_ key: String) {
+        guard !busy, canDelete(key) else { return }
+        let windowIDs = Set(library.windows(for: key).map(\.id))
+        do {
+            try library.deleteDesktop(key, from: store)
+            runtimeTargets.removeValue(forKey: key)
+            selectedKeys.remove(key)
+            activities.removeValue(forKey: key)
+            retryDesktopKeys.remove(key)
+            outcomes.removeAll { windowIDs.contains($0.windowID) }
+            status = "已删除该桌面的保存窗口信息。"
+        } catch { status = error.localizedDescription }
+        onChange?()
+    }
+
     /// 重绑是明确确认的模板写入，不操作真实桌面；同时转移勾选并清理旧结果。
     func rebind(_ source: WorkspaceDesktop, to target: WorkspaceDesktop) {
         guard !busy else { return }
@@ -280,6 +359,8 @@ final class WorkspaceSceneController {
             try library.rebind(source, to: target, store: store)
             selectedKeys.remove(source.selectionKey)
             selectedKeys.insert(target.selectionKey)
+            runtimeTargets.removeValue(forKey: source.selectionKey)
+            runtimeTargets.removeValue(forKey: target.selectionKey)
             activities.removeValue(forKey: source.selectionKey)
             activities.removeValue(forKey: target.selectionKey)
             outcomes = []

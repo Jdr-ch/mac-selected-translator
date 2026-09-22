@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 验证查看详情、复选框和业务按钮的事件隔离，不操作真实桌面。
 @MainActor

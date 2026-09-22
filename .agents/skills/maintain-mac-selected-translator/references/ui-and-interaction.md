@@ -19,7 +19,7 @@
 
 ## 菜单栏：沿一条原生事件链排查
 
-先读 `Sources/SelectedTextTranslatorApp/AppDelegate.swift`：
+先读 `Sources/GleamApp/AppDelegate.swift`：
 
 1. 从 `setupStatusItem` 找到持有的 `NSStatusItem`，确认使用 `item.menu = menu`。菜单项的 `target` 显式指向 delegate。
 2. 从 `setupStatusIcon` 进入 `StatusItemIconAnimator`。注意类型仍放在 `StatusItemIconView.swift` 中，不按旧文件名假定当前还在使用自绘视图。

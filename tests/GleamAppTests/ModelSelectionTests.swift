@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Isolated defaults, an intercepted HTTP client and offscreen controls never touch CLI config files.
 @Suite(.serialized)

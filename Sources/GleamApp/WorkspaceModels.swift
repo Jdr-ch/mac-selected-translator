@@ -14,19 +14,37 @@ struct WorkspaceScene: Codable {
     var savedDesktops: [WorkspaceDesktop] {
         var seen: Set<String> = []
         return ((desktops ?? []) + windows.map(\.desktop)).filter { seen.insert($0.selectionKey).inserted }
-            .sorted { $0.ordinal < $1.ordinal }
+            .sorted { $0.displayID == $1.displayID ? $0.ordinal < $1.ordinal : $0.displayID < $1.displayID }
     }
 }
 
-/// 按显示器与“桌面 N”绑定；系统 UUID 和 Space ID 仅描述采集时的实际空间。
+/// 按显示器和 WindowServer 提供的 Space UUID 绑定；ordinal 只用于当前拓扑排序和临时展示。
 struct WorkspaceDesktop: Codable, Equatable, Identifiable {
     var id: String
     var displayID: String
     var ordinal: Int
     var spaceID: UInt64
     var screenFrame: CGRect
-    var label: String { "桌面 \(ordinal)" }
-    var selectionKey: String { "\(displayID)#\(ordinal)" }
+    /// 使用 UUID 的短尾作为桌面标记，避免把会随显示器拓扑变化的序号当作身份。
+    var label: String {
+        let compactID = id.replacingOccurrences(of: "-", with: "")
+        let marker = compactID.isEmpty ? "未知" : String(compactID.suffix(8))
+        return "桌面 \(marker)"
+    }
+    /// 选择键只依赖显示器和 Space UUID；ordinal 变化不会把同一个桌面拆成新条目。
+    var selectionKey: String { "\(displayID)#\(id)" }
+
+    /// 将实际运行时 Space 的编号、几何和 Space ID 合并到已保存桌面身份，供重新采集复用原模板。
+    func withRuntime(_ runtime: WorkspaceDesktop) -> WorkspaceDesktop {
+        var copy = self
+        copy.ordinal = runtime.ordinal
+        copy.spaceID = runtime.spaceID
+        copy.screenFrame = runtime.screenFrame
+        return copy
+    }
+
+    /// 卡片和详情统一显示显示器与稳定桌面标记；显示器内序号只作为运行时排序信息。
+    func identityLabel(displayName: String) -> String { "\(displayName) · \(label)" }
 }
 
 /// 窗口位置相对屏幕可用区域保存，同一分辨率精确还原，变化时按比例适配。
@@ -115,7 +133,7 @@ enum WorkspaceGeometry {
     }
 
     static func resolve(_ saved: WorkspaceDesktop, in desktops: [WorkspaceDesktop]) throws -> WorkspaceDesktop {
-        guard let desktop = desktops.first(where: { $0.selectionKey == saved.selectionKey }) else {
+        guard let desktop = desktops.first(where: { $0.id == saved.id && $0.displayID == saved.displayID }) else {
             throw WorkspaceError.message("未找到原显示器上的\(saved.label)，请重新绑定桌面。")
         }
         return desktop
@@ -125,7 +143,7 @@ enum WorkspaceGeometry {
 /// 场景使用原子写入；损坏或不支持的版本显式报错，不以空场景覆盖旧数据。
 final class WorkspaceSceneStore {
     static let directory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/SelectedTextTranslator/WorkspaceScene")
+        .appendingPathComponent("Library/Application Support/Gleam/WorkspaceScene")
     let file: URL
 
     init(file: URL = WorkspaceSceneStore.directory.appendingPathComponent("scene.json")) { self.file = file }
@@ -137,8 +155,9 @@ final class WorkspaceSceneStore {
         return scene
     }
 
-    func save(_ scene: WorkspaceScene) throws {
-        guard !scene.savedDesktops.isEmpty, scene.windows.allSatisfy({ $0.issues.isEmpty }) else {
+    /// 默认拒绝带待补充项的场景；工作场景面板显式允许保留这些窗口，供用户先保存布局再补采集。
+    func save(_ scene: WorkspaceScene, allowingIncomplete: Bool = false) throws {
+        guard allowingIncomplete || scene.windows.allSatisfy({ $0.issues.isEmpty }) else {
             throw WorkspaceError.message("请先补全待处理条目，再保存工作场景。")
         }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)

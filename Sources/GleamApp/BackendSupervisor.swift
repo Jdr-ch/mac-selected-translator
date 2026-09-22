@@ -133,7 +133,7 @@ final class BackendSupervisor {
 
     private func openBackendLogHandle() throws -> FileHandle {
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("selected-text-translator-backend.log")
+            .appendingPathComponent("gleam-backend.log")
 
         // The backend can emit request logs over time. Sending those logs to a
         // file keeps the Finder-launched app quiet while preventing stdout or
@@ -156,7 +156,7 @@ final class BackendSupervisor {
             if let ownedProcess, !ownedProcess.isRunning {
                 self.ownedProcess = nil
                 throw TranslatorAppError.backendStartupFailed(
-                    "本地翻译服务提前退出，请检查 Python 依赖，或查看 /tmp/selected-text-translator-backend.log。"
+                    "本地翻译服务提前退出，请检查 Python 依赖，或查看 /tmp/gleam-backend.log。"
                 )
             }
 

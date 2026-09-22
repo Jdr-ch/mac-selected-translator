@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Locks the backend-text presentation contract without opening a real AppKit panel.
 struct TranslationResultPresentationTests {

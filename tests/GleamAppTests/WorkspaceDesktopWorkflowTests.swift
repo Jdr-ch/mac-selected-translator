@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 使用临时模板和注入的桌面拓扑验证独立保存、选择范围与并发，不打开真实应用或创建桌面。
 struct WorkspaceDesktopWorkflowTests {
@@ -24,7 +24,7 @@ struct WorkspaceDesktopWorkflowTests {
         var library = WorkspaceSceneDrafts(saved: WorkspaceScene(profileToken: "", chromeProfileDirectory: "", windows: [savedThree]))
         library.drafts[desktop(5).selectionKey] = WorkspaceDesktopDraft(desktop: desktop(5), windows: [draftFive])
         library.drafts[desktop(7).selectionKey] = WorkspaceDesktopDraft(desktop: desktop(7), windows: [draftSeven])
-        try library.save(desktop(7).selectionKey, to: store)
+        _ = try library.save(desktop(7).selectionKey, to: store)
         #expect(try store.load()?.windows.map(\.id) == [savedThree.id, draftSeven.id])
         #expect(library.drafts[desktop(5).selectionKey]?.windows.first?.id == draftFive.id)
         #expect(library.drafts[desktop(7).selectionKey] == nil)
@@ -51,9 +51,26 @@ struct WorkspaceDesktopWorkflowTests {
         #expect(decoded.savedDesktops.map(\.ordinal) == [3])
         var library = WorkspaceSceneDrafts(saved: decoded)
         library.drafts[desktop(3).selectionKey] = WorkspaceDesktopDraft(desktop: desktop(3), windows: [])
-        try library.save(desktop(3).selectionKey, to: store)
+        _ = try library.save(desktop(3).selectionKey, to: store)
         #expect(try store.load()?.windows.isEmpty == true)
         #expect(try store.load()?.savedDesktops.map(\.ordinal) == [3])
+    }
+
+    @Test func deletingSavedDesktopRemovesOnlyItsWindows() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceSceneStore(file: root.appendingPathComponent("scene.json"))
+        let first = entry(1, title: "first")
+        let second = entry(2, title: "second")
+        var library = WorkspaceSceneDrafts(saved: WorkspaceScene(profileToken: "profile", chromeProfileDirectory: "Default",
+            windows: [first, second]))
+        try store.save(library.saved!)
+        try library.deleteDesktop(first.desktop.selectionKey, from: store)
+        #expect(library.saved?.windows.map(\.id) == [second.id])
+        #expect(try store.load()?.savedDesktops.map(\.selectionKey) == [second.desktop.selectionKey])
+        try library.deleteDesktop(second.desktop.selectionKey, from: store)
+        #expect(try store.load()?.savedDesktops.isEmpty == true)
+        #expect(try store.load()?.windows.isEmpty == true)
     }
 
     @Test func incompleteDesktopAndWriteFailureKeepDraftAndSavedBytes() throws {
@@ -77,6 +94,23 @@ struct WorkspaceDesktopWorkflowTests {
         #expect(library.drafts[desktop(3).selectionKey] != nil)
     }
 
+    @Test func explicitPartialSaveKeepsIncompleteWindowForLaterRecapture() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkspaceSceneStore(file: root.appendingPathComponent("scene.json"))
+        var incomplete = entry(3)
+        incomplete.issues = ["Chrome 扩展待连接"]
+        var library = WorkspaceSceneDrafts()
+        library.drafts[incomplete.desktop.selectionKey] = WorkspaceDesktopDraft(desktop: incomplete.desktop, windows: [incomplete])
+
+        let result = try library.save(incomplete.desktop.selectionKey, to: store, allowingIncomplete: true)
+
+        #expect(result.incompleteCount == 1)
+        #expect(result.totalCount == 1)
+        #expect(library.drafts[incomplete.desktop.selectionKey] == nil)
+        #expect(try store.load()?.windows.first?.issues == ["Chrome 扩展待连接"])
+    }
+
     @Test func rebindMovesWholeDesktopAndKeepsTargetWindows() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -90,54 +124,46 @@ struct WorkspaceDesktopWorkflowTests {
         #expect(library.saved?.windows.allSatisfy { $0.desktop.ordinal == 5 } == true)
     }
 
-    @Test @MainActor func preparationAddsOnlyMissingDesktopsAndIsIdempotent() async throws {
+    @Test @MainActor func preparationUsesEmptyDesktopBeforeCreating() async throws {
+        let topology = [desktop(1), desktop(2)]
+        var additions = 0
+        let result = await WorkspaceDesktopPreparation.prepare([desktop(1)], read: { topology }, add: { _ in additions += 1 },
+            empty: { desktops in Set(desktops.dropFirst().map(\.spaceID)) })
+        #expect(additions == 0)
+        #expect(try result[desktop(1).selectionKey]?.get().spaceID == 2)
+    }
+
+    @Test @MainActor func preparationCreatesWhenEveryDesktopIsOccupied() async throws {
         var topology = [desktop(1), desktop(2)]
         var additions = 0
-        let add: (String) async throws -> Void = { displayID in
+        let result = await WorkspaceDesktopPreparation.prepare([desktop(5)], read: { topology }, add: { displayID in
             additions += 1
-            var next = desktop(topology.count + 1, display: displayID)
-            next.id = "created-\(additions)"
-            topology.append(next)
-        }
-        let result = await WorkspaceDesktopPreparation.prepare([desktop(3), desktop(5)], read: { topology }, add: add)
-        #expect(additions == 3)
-        #expect(try result[desktop(5).selectionKey]?.get().ordinal == 5)
-        _ = await WorkspaceDesktopPreparation.prepare([desktop(3), desktop(5)], read: { topology }, add: add)
-        #expect(additions == 3)
+            topology.append(WorkspaceDesktop(id: "created-\(additions)", displayID: displayID, ordinal: topology.count + 1,
+                spaceID: UInt64(topology.count + 1), screenFrame: CGRect(x: 0, y: 0, width: 1200, height: 800)))
+        }, empty: { _ in [] })
+        #expect(additions == 1)
+        #expect(try result[desktop(5).selectionKey]?.get().spaceID == 3)
     }
 
-    @Test @MainActor func failedCreationKeepsExistingTargetsAndDoesNotLoop() async throws {
-        let topology = [desktop(1), desktop(2)]
-        var attempts = 0
-        let result = await WorkspaceDesktopPreparation.prepare([desktop(1), desktop(3)], read: { topology }, add: { _ in attempts += 1 })
-        #expect(attempts == 1)
-        #expect(try result[desktop(1).selectionKey]?.get().ordinal == 1)
-        #expect(throws: (any Error).self) { try result[desktop(3).selectionKey]?.get() }
+    @Test @MainActor func preparationAssignsDistinctEmptyDesktops() async throws {
+        let topology = [desktop(1), desktop(2), desktop(3)]
+        let requested = [desktop(5), desktop(6)]
+        var additions = 0
+        let result = await WorkspaceDesktopPreparation.prepare(requested, read: { topology }, add: { _ in additions += 1 },
+            empty: { desktops in Set(desktops.dropFirst().map(\.spaceID)) })
+        #expect(additions == 0)
+        #expect(try result[requested[0].selectionKey]?.get().spaceID == 2)
+        #expect(try result[requested[1].selectionKey]?.get().spaceID == 3)
     }
 
-    @Test @MainActor func missingDisplayAndUnreachableOrdinalDoNotCreate() async throws {
+    @Test @MainActor func missingDisplayDoesNotCreate() async throws {
         let topology = [desktop(1), desktop(2, display: "screen-b")]
-        let wrongNumber = desktop(1, display: "screen-b")
         let missingScreen = desktop(5, display: "gone")
         var attempts = 0
-        let result = await WorkspaceDesktopPreparation.prepare([wrongNumber, missingScreen], read: { topology }, add: { _ in attempts += 1 })
+        let result = await WorkspaceDesktopPreparation.prepare([missingScreen], read: { topology }, add: { _ in attempts += 1 },
+            empty: { _ in [] })
         #expect(attempts == 0)
-        #expect(throws: (any Error).self) { try result[wrongNumber.selectionKey]?.get() }
         #expect(throws: (any Error).self) { try result[missingScreen.selectionKey]?.get() }
-    }
-
-    @Test @MainActor func displaysResolveAfterEarlierDisplayAddsDesktops() async throws {
-        var counts = [2, 1]
-        let topology: () -> [WorkspaceDesktop] = {
-            (1...counts[0]).map { desktop($0) } + (1...counts[1]).map { desktop(counts[0] + $0, display: "screen-b") }
-        }
-        let requested = [desktop(3), desktop(5, display: "screen-b")]
-        let result = await WorkspaceDesktopPreparation.prepare(requested, read: topology, add: { displayID in
-            counts[displayID == "screen-a" ? 0 : 1] += 1
-        })
-        #expect(counts == [3, 2])
-        #expect(try result[requested[0].selectionKey]?.get().ordinal == 3)
-        #expect(try result[requested[1].selectionKey]?.get().ordinal == 5)
     }
 
     @Test @MainActor func concurrentRestoreIsBoundedAndFailureDoesNotCancelOthers() async {

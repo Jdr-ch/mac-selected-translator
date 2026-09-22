@@ -1,6 +1,6 @@
-# Mac Selected Translator
+# 拾光 Gleam
 
-一个本机 macOS 划词翻译原型：选中文字后按 `Option+Tab`，在鼠标附近弹出翻译浮层。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调用 Codex 或 Qwen 的既有配置。
+一个本机 macOS 菜单栏工具：选中文字后按 `Option+Tab`，在鼠标附近弹出翻译浮层；另集成润色、流程图、电源监控、工作场景与 iPhone 定位。桌面壳使用 Swift/AppKit，模型层使用 Python + LangChain 调用 Codex 或 Qwen 的既有配置。
 
 ## 功能
 
@@ -40,7 +40,7 @@
 
 Chrome 使用独立目录 `/Users/jiangdengrui/Documents/AI/chrome-extension` 中的 Manifest V3 扩展，安装与单独维护步骤见该目录的 README。构建脚本将 `WorkspaceChromeHost` 打包进 App，`scripts/install_workspace_extension_host.py` 注册 Native Messaging 宿主。
 
-模板只保存在 `~/Library/Application Support/SelectedTextTranslator/WorkspaceScene/scene.json`；每次保存只更新相应桌面，保留其他桌面与未保存草稿，也支持保存空桌面。恢复只读取勾选桌面的已保存版本，其他桌面有草稿时仍可恢复。桌面通过“桌面 N”名称和原显示器匹配，删除重建后的同名桌面可直接复用；缺失时通过调度中心按需追加创建，每次创建后回读确认，最多 16 个普通桌面／显示器。原显示器断开或跨显示器编号无法通过追加获得时，使用“重新绑定桌面…”将整桌面模板绑定并保存到新目标。
+模板只保存在 `~/Library/Application Support/Gleam/WorkspaceScene/scene.json`；每次保存只更新相应桌面，保留其他桌面与未保存草稿，也支持保存空桌面。列表中的“删除”只删除该桌面的保存窗口信息，不删除真实窗口或系统桌面。恢复只读取勾选桌面的已保存版本，其他桌面有草稿时仍可恢复。桌面身份使用显示器和 WindowServer 的 Space UUID，显示器内序号只用于当前清单排序，不参与模板匹配。恢复时优先在对应显示器上寻找没有应用窗口的普通桌面，直接在空桌面打开窗口；没有空桌面时才通过调度中心追加创建，每次创建后回读确认，最多 16 个普通桌面／显示器。原显示器断开时，使用“重新绑定桌面…”将整桌面模板绑定并保存到新目标。
 
 恢复前集中准备目标桌面，然后最多并发处理 4 个窗口；WebStorm 项目按模板顺序串行恢复，前一项目打开和定位完成或失败后再执行下一项，窗口等待上限为 120 秒。Chrome 群组修改与同应用启动采用独占入口，其他应用仍可并行。恢复复用现有项目和群组、补齐缺少标签，保留用户额外标签。某个窗口失败后其他项继续，明细展示失败阶段和原因，可仅重试所选桌面的失败项；不自动运行开发服务，也不新增登录后自动恢复。
 
@@ -54,7 +54,7 @@ WebStorm 项目通过 LaunchServices 的系统应用入口打开，不直接派�
 
 扩展重新安装或本地存储重建后，旧场景仍可恢复：App 优先使用原连接，失效时核对唯一在线连接与原资料安装目录再重新连接，不必重新采集。资料不同或存在多个无法区分的连接时会明确提示；连接、打开群组、匹配系统窗口和验证布局的超时会分别说明失败阶段。
 
-采集以 WindowServer 的全部桌面清单为准，通过后台读取补齐 `AXWindows` 未暴露的其他桌面窗口，无需逐个切换桌面。暂未响应的窗口会在预览中标为待处理并阻止所属桌面保存，其他完整桌面仍可保存；再次采集继续读取缺失窗口。桌面行分别显示窗口数量和运行结果。
+采集以 WindowServer 的全部桌面清单为准，通过后台读取补齐 `AXWindows` 未暴露的其他桌面窗口，无需逐个切换桌面。暂未响应的窗口会在预览中标为待处理；保存时保留桌面、原生窗口布局和待补充标记，恢复会跳过这些条目，重新采集后可覆盖。桌面行分别显示窗口数量和运行结果。
 
 ## 初始化
 
@@ -108,7 +108,7 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 生成后可以直接双击：
 
 ```text
-/Users/jiangdengrui/Documents/AI/mac-selected-translator/dist/Selected Text Translator.app
+/Users/jiangdengrui/Documents/AI/mac-selected-translator/dist/拾光.app
 ```
 
 也可以命令行打开：
@@ -136,7 +136,7 @@ cd /Users/jiangdengrui/Documents/AI/mac-selected-translator
 系统设置 > 隐私与安全性 > 辅助功能
 ```
 
-允许当前终端或编译出的 `SelectedTextTranslatorApp`。授权后重新启动工具。
+允许当前终端或编译出的 `GleamApp`。授权后重新启动工具。
 
 ## 使用
 

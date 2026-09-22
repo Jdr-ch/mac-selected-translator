@@ -9,4 +9,4 @@ load_translator_configuration "${ROOT_DIR}/.env"
 
 export TRANSLATOR_PROJECT_ROOT="${TRANSLATOR_PROJECT_ROOT:-${ROOT_DIR}}"
 
-exec swift run --package-path "${ROOT_DIR}" SelectedTextTranslatorApp
+exec swift run --package-path "${ROOT_DIR}" GleamApp

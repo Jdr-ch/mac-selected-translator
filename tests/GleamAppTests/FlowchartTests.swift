@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Native feature checks use isolated preferences and do not launch the installed menu-bar app.
 @Suite(.serialized)

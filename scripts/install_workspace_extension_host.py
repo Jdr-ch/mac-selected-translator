@@ -10,7 +10,7 @@ import re
 def main():
     """在安装包存在时生成宿主清单；不改写 Chrome 用户资料或其他扩展设置。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", type=Path, default=Path("/Applications/Selected Text Translator.app"))
+    parser.add_argument("--app", type=Path, default=Path("/Applications/拾光.app"))
     parser.add_argument("--extension-dir", type=Path, required=True)
     args = parser.parse_args()
     contract = json.loads((args.extension_dir / "bridge-contract.json").read_text())

@@ -9,7 +9,7 @@ final class NativeHost {
     private var profileDirectory: URL?
     private var lockDescriptor: Int32 = -1
     private let root = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/SelectedTextTranslator/WorkspaceScene/bridge")
+        .appendingPathComponent("Library/Application Support/Gleam/WorkspaceScene/bridge")
 
     /// Chrome 的每帧以前四字节小端长度开头；流式读取避免管道短读破坏消息边界。
     private func readExactly(_ count: Int) throws -> Data? {

@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Exercises chunk boundaries and incomplete requests without changing real model settings.
 @Suite(.serialized, .timeLimit(.minutes(1)))

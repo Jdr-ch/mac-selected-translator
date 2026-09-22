@@ -1,13 +1,13 @@
 ---
 name: maintain-mac-selected-translator
-description: 仅用于 mac-selected-translator（Selected Text Translator，com.local.selected-text-translator）项目的设计迭代、Swift/AppKit 实现、故障诊断、聚焦验证和明确授权后的 App 替换。用户提到本项目的任务栏或菜单栏图标、A/文动画、绿灯与禁止休眠、登录自启动、双屏显示、划词翻译弹窗、候选词留白或替换当前 App 时使用。不要用于其他 macOS 应用、通用 Swift 开发或无关仓库；只有讨论、设计或诊断时不得自动实施或安装。
+description: 仅用于 mac-selected-translator（拾光，com.local.gleam）项目的设计迭代、Swift/AppKit 实现、故障诊断、聚焦验证和明确授权后的 App 替换。用户提到本项目的任务栏或菜单栏图标、A/文动画、绿灯与禁止休眠、登录自启动、双屏显示、划词翻译弹窗、候选词留白或替换当前 App 时使用。不要用于其他 macOS 应用、通用 Swift 开发或无关仓库；只有讨论、设计或诊断时不得自动实施或安装。
 ---
 
 # 划词翻译项目维护
 
 ## 先限定项目与动作
 
-1. 从当前工作目录定位 Git 根。原始路径为 `/Users/jiangdengrui/Documents/AI/mac-selected-translator`；移动或克隆后，以 `Package.swift` 中的 `MacSelectedTranslator` / `SelectedTextTranslatorApp`、`Sources/SelectedTextTranslatorApp/` 和构建脚本中的 Bundle ID 交叉确认，不单凭相似目录名套用规则。
+1. 从当前工作目录定位 Git 根。原始路径为 `/Users/jiangdengrui/Documents/AI/mac-selected-translator`；移动或克隆后，以 `Package.swift` 中的 `MacGleam` / `GleamApp`、`Sources/GleamApp/` 和构建脚本中的 Bundle ID 交叉确认，不单凭相似目录名套用规则。
 2. 将用户的“任务栏图标”映射到本项目的 macOS 菜单栏状态项；区分状态项菜单、划词翻译浮层和 Finder 中的 `.app` 图标。
 3. 先读当前源码与目标 diff；把本文参数当作 2026-09-05 的实现基线，不当作永远不变的产品要求。用户最新确认优先。
 4. 用户说“给出设计／先设计再做”时，只交付设计和交互说明，等待确认后再改代码。用户只问原因时，先诊断；不得擅自安装、注册登录项或调整 macOS 设置。
@@ -19,9 +19,9 @@ description: 仅用于 mac-selected-translator（Selected Text Translator，com.
 
 | 请求 | 先读的源码入口 | 按需参考 |
 | --- | --- | --- |
-| 菜单点击、双屏图标、A/文动画、绿灯 | `AppDelegate.swift`、`StatusItemIconView.swift`、`SleepPreventionController.swift`，均在 `Sources/SelectedTextTranslatorApp/` | [UI 与交互迭代](references/ui-and-interaction.md) |
+| 菜单点击、双屏图标、A/文动画、绿灯 | `AppDelegate.swift`、`StatusItemIconView.swift`、`SleepPreventionController.swift`，均在 `Sources/GleamApp/` | [UI 与交互迭代](references/ui-and-interaction.md) |
 | 登录自启动 | `AppDelegate.swift` 的 `registerLaunchAtLoginIfNeeded`、`scripts/build_app.sh` | [构建替换与验收](references/build-and-verification.md) |
-| 弹窗美化、候选词高度、复制关闭 | `FloatingPanelController.swift`、`TranslationResultPresentation.swift`，均在 `Sources/SelectedTextTranslatorApp/` | [UI 与交互迭代](references/ui-and-interaction.md) |
+| 弹窗美化、候选词高度、复制关闭 | `FloatingPanelController.swift`、`TranslationResultPresentation.swift`，均在 `Sources/GleamApp/` | [UI 与交互迭代](references/ui-and-interaction.md) |
 | 构建、替换 App、解释验证结果 | `scripts/build_app.sh`、`Package.swift`、本轮目标测试 | [构建替换与验收](references/build-and-verification.md) |
 | 修改过程回顾、接手此前版本 | 本轮相关源码与测试 | [UI 与交互迭代](references/ui-and-interaction.md) 中的迭代结论和证据限制 |
 

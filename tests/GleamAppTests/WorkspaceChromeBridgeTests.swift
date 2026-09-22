@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 用隔离的安装记录与真实进程心跳复现令牌变化，不启动 Chrome 或修改用户场景。
 @MainActor
@@ -52,6 +52,14 @@ struct WorkspaceChromeBridgeTests {
         try withBridge(installed: ["Default"], connected: []) { bridge in
             let profile = try bridge.restorationProfile(savedProfile: saved, profileDirectory: "Default")
             #expect(profile == nil)
+        }
+    }
+
+    /// 配置文件不可读时，在线令牌仍足以确认唯一资料，恢复不应再次误报扩展缺失。
+    @Test func connectedProfileCanRestoreWithoutDirectory() throws {
+        try withBridge(installed: [], connected: [replacement]) { bridge in
+            let profile = try bridge.restorationProfile(savedProfile: saved, profileDirectory: "")
+            #expect(profile == replacement)
         }
     }
 

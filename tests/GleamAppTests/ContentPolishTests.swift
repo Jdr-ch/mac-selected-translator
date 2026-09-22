@@ -1,6 +1,6 @@
 import AppKit
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Uses isolated preferences and offscreen native controls; never reads the user's real selection.
 @Suite(.serialized)

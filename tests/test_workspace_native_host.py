@@ -14,7 +14,7 @@ class WorkspaceNativeHostTests(unittest.TestCase):
     def setUp(self):
         """每个测试使用独立资料令牌，仅清理本次创建的邮箱。"""
         self.token = str(uuid.uuid4())
-        self.directory = Path.home() / "Library/Application Support/SelectedTextTranslator/WorkspaceScene/bridge" / self.token
+        self.directory = Path.home() / "Library/Application Support/Gleam/WorkspaceScene/bridge" / self.token
         executable = Path(__file__).resolve().parents[1] / ".build/debug/WorkspaceChromeHost"
         self.process = subprocess.Popen([str(executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.send({"protocolVersion": 1, "kind": "hello", "profileToken": self.token})

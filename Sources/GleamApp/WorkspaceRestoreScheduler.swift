@@ -52,51 +52,54 @@ enum WorkspaceRestoreScheduler {
     }
 }
 
-/// 在启动应用前准备全部目标桌面；添加会改变后续显示器的编号，因此最后统一重新解析。
+/// 在启动应用前准备全部目标桌面；每块显示器优先复用未占用的普通桌面，没有空桌面才追加创建。
 @MainActor
 enum WorkspaceDesktopPreparation {
     static func prepare(_ requested: [WorkspaceDesktop],
                         read: () throws -> [WorkspaceDesktop],
                         add: (String) async throws -> Void,
-                        progress: (String) -> Void = { _ in }) async -> [String: Result<WorkspaceDesktop, Error>] {
+                        progress: (String) -> Void = { _ in },
+                        empty: ([WorkspaceDesktop]) throws -> Set<UInt64> = { _ in [] }) async -> [String: Result<WorkspaceDesktop, Error>] {
         do {
             var topology = try read()
-            var seen: Set<String> = []
-            let displays = topology.map(\.displayID).filter { seen.insert($0).inserted }
+            var emptySpaceIDs = try empty(topology)
+            var assignedSpaceIDs: Set<UInt64> = []
             var failures: [String: Error] = [:]
-            for displayID in displays {
-                let targets = requested.filter { $0.displayID == displayID }
-                guard let highest = targets.map(\.ordinal).max() else { continue }
-                do {
-                    var current = topology.filter { $0.displayID == displayID }
-                    // 普通桌面只能追加；无法通过追加获得更小的跨显示器编号时要求显式重绑。
-                    guard let first = current.first, targets.allSatisfy({ $0.ordinal >= first.ordinal }),
-                          highest - first.ordinal < 16 else {
-                        throw WorkspaceError.message("桌面编号与显示器布局不匹配，请重新绑定目标桌面。")
-                    }
-                    while let last = current.last, last.ordinal < highest {
-                        guard current.count < 16 else { throw WorkspaceError.message("该显示器已达到 16 个普通桌面的创建上限。") }
-                        progress(displayID)
-                        let previousIDs = Set(current.map(\.spaceID))
-                        try await add(displayID)
-                        topology = try read()
-                        current = topology.filter { $0.displayID == displayID }
-                        let currentIDs = Set(current.map(\.spaceID))
-                        guard currentIDs.count == previousIDs.count + 1, previousIDs.isSubset(of: currentIDs) else {
-                            throw WorkspaceError.message("未确认新桌面创建成功，已停止继续创建，请检查调度中心后重试。")
-                        }
-                    }
-                } catch { failures[displayID] = error }
-            }
-            topology = try read()
             var results: [String: Result<WorkspaceDesktop, Error>] = [:]
             for desktop in requested {
-                // 创建失败不影响同一显示器上原本存在且仍能匹配的桌面。
-                if let resolved = try? WorkspaceGeometry.resolve(desktop, in: topology) {
-                    results[desktop.selectionKey] = .success(resolved)
-                } else {
-                    results[desktop.selectionKey] = .failure(failures[desktop.displayID]
-                        ?? WorkspaceError.message("未找到原显示器上的\(desktop.label)，请重新绑定。"))
+                let key = desktop.selectionKey
+                do {
+                    if let failure = failures[desktop.displayID] { throw failure }
+                    var current = topology.filter { $0.displayID == desktop.displayID }.sorted { $0.ordinal < $1.ordinal }
+                    guard !current.isEmpty else {
+                        throw WorkspaceError.message("目标显示器已断开，无法恢复\(desktop.label)。")
+                    }
+                    let available = current.filter { !assignedSpaceIDs.contains($0.spaceID) }
+                    // 同一个 Space 仍存在且为空时优先复用；否则选择该显示器上的任意空桌面。
+                    if let target = available.first(where: { $0.id == desktop.id && emptySpaceIDs.contains($0.spaceID) })
+                        ?? available.first(where: { emptySpaceIDs.contains($0.spaceID) }) {
+                        assignedSpaceIDs.insert(target.spaceID)
+                        results[key] = .success(target)
+                        continue
+                    }
+                    guard current.count < 16 else {
+                        throw WorkspaceError.message("该显示器已达到 16 个普通桌面的创建上限，且没有空桌面可用。")
+                    }
+                    let previousIDs = Set(current.map(\.spaceID))
+                    progress(desktop.displayID)
+                    try await add(desktop.displayID)
+                    topology = try read()
+                    current = topology.filter { $0.displayID == desktop.displayID }.sorted { $0.ordinal < $1.ordinal }
+                    let created = current.first { !previousIDs.contains($0.spaceID) && !assignedSpaceIDs.contains($0.spaceID) }
+                    guard let created else {
+                        throw WorkspaceError.message("未确认新桌面创建成功，已停止继续创建，请检查调度中心后重试。")
+                    }
+                    emptySpaceIDs = try empty(topology)
+                    assignedSpaceIDs.insert(created.spaceID)
+                    results[key] = .success(created)
+                } catch {
+                    failures[desktop.displayID] = error
+                    results[key] = .failure(error)
                 }
             }
             return results

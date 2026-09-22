@@ -118,7 +118,7 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         scroll.borderType = .noBorder
         scroll.documentView = cards
         let detailSurface = buildDetails()
-        let footer = NSTextField(labelWithString: "默认勾选已保存桌面 · 保存仅更新所选桌面")
+        let footer = NSTextField(labelWithString: "默认勾选已保存桌面 · 保存仅更新所选桌面 · 待补充窗口可先保存后重新采集")
         footer.font = .systemFont(ofSize: 11)
         footer.textColor = WorkspaceScenePalette.secondary
         statusLabel.font = .systemFont(ofSize: 12)
@@ -207,13 +207,15 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
                 card.onCapture = { [weak self] in self?.focus(key); Task { await self?.session.capture(keys: [key]) } }
                 card.onSave = { [weak self] in self?.focus(key); self?.session.save(keys: [key]) }
                 card.onRestore = { [weak self] in self?.focus(key); Task { await self?.session.restore(keys: [key]) } }
+                card.onDelete = { [weak self] in self?.confirmDeleteDesktop(key) }
                 cards.insertArrangedSubview(card, at: index)
                 card.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
             }
             card.configure(desktop: desktop, windows: session.library.windows(for: key), displayName: displayName(desktop),
                 saved: session.savedKeys.contains(key), draft: session.library.drafts[key] != nil,
                 selected: session.selectedKeys.contains(key), activity: session.activity(for: desktop), busy: session.busy,
-                canCapture: session.canCapture(key), canSave: session.canSave(key), canRestore: session.canRestore(key), outcomes: session.outcomes)
+                canCapture: session.canCapture(key), canSave: session.canSave(key), canRestore: session.canRestore(key),
+                canDelete: session.canDelete(key), outcomes: session.outcomes)
         }
         if focusedDesktopKey == nil || !keys.contains(focusedDesktopKey!) {
             focusedDesktopKey = desktops.first(where: { session.savedKeys.contains($0.selectionKey) })?.selectionKey ?? desktops.first?.selectionKey
@@ -258,6 +260,11 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         return "显示器未连接"
     }
 
+    /// 将运行时显示器名称与 Space UUID 短标记合并为面板中稳定可读的桌面身份。
+    private func desktopTitle(_ desktop: WorkspaceDesktop) -> String {
+        desktop.identityLabel(displayName: displayName(desktop))
+    }
+
     private func selectedDesktop() -> WorkspaceDesktop? { session.desktops.first { $0.selectionKey == focusedDesktopKey } }
     private func selectedEntry() -> WorkspaceWindow? { detailEntries.first { $0.id == focusedWindowID } }
 
@@ -272,12 +279,12 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         windowTabs.configure(detailEntries.map { entry in
             WorkspaceWindowPresentation(entry, outcome: session.outcomes.first { $0.windowID == entry.id })
         }, selectedID: focusedWindowID)
-        detailTitle.stringValue = (selectedDesktop()?.label ?? "桌面") + " · 窗口详情"
+        detailTitle.stringValue = (selectedDesktop().map(desktopTitle) ?? "桌面") + " · 窗口详情"
         projectButton.isEnabled = !session.busy && selectedEntry()?.bundleID == "com.jetbrains.WebStorm"
         rebindButton.isEnabled = !session.busy && focusedDesktopKey.map { session.savedKeys.contains($0) } == true
         removeButton.isEnabled = !session.busy && selectedEntry() != nil
         if let entry = selectedEntry() { details.string = detailText(entry) }
-        else if let desktop = selectedDesktop() { details.string = "\(desktop.label) · \(session.activity(for: desktop).message)\n采集后可在这里检查窗口、群组和布局。" }
+        else if let desktop = selectedDesktop() { details.string = "\(desktopTitle(desktop)) · \(session.activity(for: desktop).message)\n采集后可在这里检查窗口、群组和布局。" }
         else { details.string = "点击桌面卡片查看窗口详情；通过复选框勾选需要操作的桌面。" }
         if displayedWindowID != focusedWindowID {
             displayedWindowID = focusedWindowID
@@ -328,9 +335,9 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         let targets = session.currentDesktops
         guard !targets.isEmpty else { return }
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 28))
-        popup.addItems(withTitles: targets.map { "\($0.label) · \($0.displayID.prefix(8))" })
+        popup.addItems(withTitles: targets.map { desktopTitle($0) })
         let alert = NSAlert()
-        alert.messageText = "重新绑定 \(desktop.label) 的所有窗口"
+        alert.messageText = "重新绑定 \(desktopTitle(desktop)) 的所有窗口"
         alert.informativeText = "保存到新的目标桌面，保留目标已有模板。此操作不会移动真实窗口。"
         alert.accessoryView = popup
         alert.addButton(withTitle: "绑定并保存")
@@ -341,14 +348,30 @@ final class WorkspaceSceneWindowController: NSWindowController, NSWindowDelegate
         }
     }
     @objc private func removeEntry() { if let entry = selectedEntry() { session.remove(entry) } }
+
+    /// 卡片删除只清理场景文件中的窗口记录，二次确认明确不会删除真实窗口或系统 Space。
+    private func confirmDeleteDesktop(_ key: String) {
+        guard let window, let desktop = session.desktops.first(where: { $0.selectionKey == key }), session.canDelete(key) else { return }
+        let alert = NSAlert()
+        alert.messageText = "删除\(desktopTitle(desktop))的保存信息？"
+        alert.informativeText = "将删除该桌面保存的全部窗口信息，不会删除真实窗口，也不会删除系统桌面。"
+        alert.addButton(withTitle: "删除保存信息")
+        alert.addButton(withTitle: "取消")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.session.deleteDesktop(key)
+        }
+    }
+
     /// 单项明细保留完整网址顺序、群组属性与布局；失败原因不依赖被截断的行内摘要。
     private func detailText(_ entry: WorkspaceWindow) -> String {
         let frame = WorkspaceGeometry.absolute(entry.relativeFrame, in: entry.desktop.screenFrame)
         let pending = session.library.issues(for: entry.desktop.selectionKey)
-        var lines = pending.isEmpty ? [] : ["待补充信息（处理后保存本桌面）"] + pending + [""]
+        var lines = pending.isEmpty ? [] : ["待补充信息（已保存本桌面后，重新采集可覆盖）"] + pending + [""]
         let activity = session.activity(for: entry.desktop)
         if activity.failed { lines += [activity.message, ""] }
-        lines += [entry.label, "\(entry.desktop.label) · 位置 (\(Int(frame.minX)), \(Int(frame.minY))) · 大小 \(Int(frame.width)) × \(Int(frame.height))"]
+        lines += [entry.label, "\(desktopTitle(entry.desktop)) · 位置 (\(Int(frame.minX)), \(Int(frame.minY))) · 大小 \(Int(frame.width)) × \(Int(frame.height))"]
         if let outcome = session.outcomes.first(where: { $0.windowID == entry.id }) {
             lines.append(outcome.error.map { "恢复失败：\($0)" } ?? "已恢复并验证")
         }

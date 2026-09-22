@@ -3,7 +3,7 @@ import ApplicationServices
 import Darwin
 import WorkspaceSkyLightBridge
 
-/// 将非公开 Spaces 接口集中在此适配层；窗口归属和每次写入均回读，不按桌面编号猜测。
+/// 将非公开 Spaces 接口集中在此适配层；窗口归属和每次写入均回读，不按桌面序号猜测。
 @MainActor
 final class WorkspaceNativeDesktop {
     private typealias Connection = @convention(c) () -> Int32
@@ -21,7 +21,7 @@ final class WorkspaceNativeDesktop {
         return unsafeBitCast(pointer, to: type)
     }
 
-    /// 从当前系统拓扑读取普通桌面，保留稳定 UUID；全屏空间不计入桌面编号。
+    /// 从当前系统拓扑读取普通桌面；UUID 是桌面身份，序号仅按显示器从 1 开始用于临时排序，全屏空间不计入。
     func desktops() throws -> [WorkspaceDesktop] {
         let connection = try symbol("SLSMainConnectionID", from: sky, as: Connection.self)()
         let copy = try symbol("SLSCopyManagedDisplaySpaces", from: sky, as: CopyDisplays.self)
@@ -33,9 +33,11 @@ final class WorkspaceNativeDesktop {
             guard let identifier = display["Display Identifier"] as? String,
                   let screen = NSScreen.screens.first(where: { screenIdentifier($0) == identifier || (identifier == "Main" && $0 == NSScreen.screens.first) }),
                   let spaces = display["Spaces"] as? [[String: Any]] else { continue }
-            for space in spaces where space["type"] as? Int == 0 {
+            var ordinal = 0
+            for space in spaces where (space["type"] as? NSNumber)?.intValue == 0 {
                 guard let id = space["uuid"] as? String, let number = space["ManagedSpaceID"] as? NSNumber else { continue }
-                result.append(WorkspaceDesktop(id: id, displayID: screenIdentifier(screen), ordinal: result.count + 1,
+                ordinal += 1
+                result.append(WorkspaceDesktop(id: id, displayID: screenIdentifier(screen), ordinal: ordinal,
                                                spaceID: number.uint64Value, screenFrame: screenFrame(screen)))
             }
         }
@@ -159,6 +161,12 @@ final class WorkspaceWindowCatalog {
                 appName: app.localizedName ?? bundleID, title: row[kCGWindowName as String] as? String ?? "未读取窗口标题",
                 frame: frame, spaceIDs: spaces)
         }
+    }
+
+    /// 通过 WindowServer 的窗口归属判断哪些普通桌面已有应用窗口，供恢复优先选择空桌面。
+    func occupiedSpaceIDs(in desktops: [WorkspaceDesktop]) throws -> Set<UInt64> {
+        let spaceIDs = Set(desktops.map(\.spaceID))
+        return Set(try windowSurfaces(in: spaceIDs).flatMap(\.spaceIDs))
     }
 
     /// 浏览器 API 编号与原生窗口编号并不相同；标题与实时位置必须能唯一关联。

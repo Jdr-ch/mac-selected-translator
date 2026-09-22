@@ -2,14 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Selected Text Translator"
+APP_NAME="拾光"
 APP_DIR="${ROOT_DIR}/dist/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 INFO_PLIST="${CONTENTS_DIR}/Info.plist"
 APP_ICON="${RESOURCES_DIR}/AppIcon.icns"
-EXECUTABLE_NAME="SelectedTextTranslatorApp"
+EXECUTABLE_NAME="GleamApp"
 BACKEND_URL="${TRANSLATOR_BACKEND_URL:-http://127.0.0.1:${TRANSLATOR_BACKEND_PORT:-8765}}"
 
 swift build --package-path "${ROOT_DIR}" -c release
@@ -22,9 +22,9 @@ chmod +x "${MACOS_DIR}/${EXECUTABLE_NAME}"
 cp "${ROOT_DIR}/.build/release/WorkspaceChromeHost" "${MACOS_DIR}/WorkspaceChromeHost"
 chmod +x "${MACOS_DIR}/WorkspaceChromeHost"
 # Keep the local renderer available without depending on SwiftPM's development build directory.
-ditto "${ROOT_DIR}/Sources/SelectedTextTranslatorApp/Resources/Flowchart" "${RESOURCES_DIR}/Flowchart"
+ditto "${ROOT_DIR}/Sources/GleamApp/Resources/Flowchart" "${RESOURCES_DIR}/Flowchart"
 
-ICON_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/selected-text-translator-icon.XXXXXX")"
+ICON_WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gleam-icon.XXXXXX")"
 trap 'rm -rf "${ICON_WORK_DIR}"' EXIT
 ICONSET_DIR="${ICON_WORK_DIR}/AppIcon.iconset"
 /usr/bin/xcrun swift "${ROOT_DIR}/scripts/generate_app_icon.swift" "${ICONSET_DIR}"
@@ -42,18 +42,19 @@ PLIST
 /usr/libexec/PlistBuddy -c "Add :CFBundleDevelopmentRegion string zh_CN" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${APP_NAME}" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string ${EXECUTABLE_NAME}" "${INFO_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.local.selected-text-translator" "${INFO_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.local.gleam" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleInfoDictionaryVersion string 6.0" "${INFO_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :CFBundleName string ${APP_NAME}" "${INFO_PLIST}"
+# CFBundleName 保持 ASCII，终端与脚本里好引用；展示名用 CFBundleDisplayName。
+/usr/libexec/PlistBuddy -c "Add :CFBundleName string Gleam" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundlePackageType string APPL" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 0.1.0" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :LSUIElement bool true" "${INFO_PLIST}"
 /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Local development build" "${INFO_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :TranslatorBackendURL string ${BACKEND_URL}" "${INFO_PLIST}"
-/usr/libexec/PlistBuddy -c "Add :TranslatorProjectRoot string ${ROOT_DIR}" "${INFO_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :GleamBackendURL string ${BACKEND_URL}" "${INFO_PLIST}"
+/usr/libexec/PlistBuddy -c "Add :GleamProjectRoot string ${ROOT_DIR}" "${INFO_PLIST}"
 
 if command -v codesign >/dev/null 2>&1; then
   codesign --force --deep --sign - "${APP_DIR}" >/dev/null

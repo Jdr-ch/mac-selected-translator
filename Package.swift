@@ -3,14 +3,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "MacSelectedTranslator",
+    name: "MacGleam",
     platforms: [
         .macOS(.v13)
     ],
     products: [
         .executable(
-            name: "SelectedTextTranslatorApp",
-            targets: ["SelectedTextTranslatorApp"]
+            name: "GleamApp",
+            targets: ["GleamApp"]
         ),
         .executable(
             name: "WorkspaceChromeHost",
@@ -19,16 +19,16 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "SelectedTextTranslatorApp",
+            name: "GleamApp",
             dependencies: ["WorkspaceSkyLightBridge"],
             resources: [.copy("Resources/Flowchart")]
         ),
         .target(name: "WorkspaceSkyLightBridge", cSettings: [.unsafeFlags(["-fobjc-arc"])]),
         .executableTarget(name: "WorkspaceChromeHost"),
         .testTarget(
-            name: "SelectedTextTranslatorAppTests",
-            dependencies: ["SelectedTextTranslatorApp"],
-            path: "tests/SelectedTextTranslatorAppTests"
+            name: "GleamAppTests",
+            dependencies: ["GleamApp"],
+            path: "tests/GleamAppTests"
         )
     ]
 )

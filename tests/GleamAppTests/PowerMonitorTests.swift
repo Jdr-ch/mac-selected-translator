@@ -1,7 +1,7 @@
 import AppKit
 import Testing
 import os
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 电源字段、采集生命周期和原生面板的聚焦验收；不更改本机电源或休眠策略。
 @Suite(.serialized)

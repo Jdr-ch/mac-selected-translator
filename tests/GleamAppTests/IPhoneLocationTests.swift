@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// Locks the form and USB-device contracts without connecting to the user's iPhone during tests.
 struct IPhoneLocationTests {

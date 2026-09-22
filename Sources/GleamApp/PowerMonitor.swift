@@ -15,7 +15,7 @@ final class PowerMonitor {
     private(set) var sampleCount = 0
     private(set) var interval: TimeInterval?
     private let read: @Sendable () -> PowerSnapshot
-    private let queue = DispatchQueue(label: "com.local.selected-text-translator.power", qos: .utility)
+    private let queue = DispatchQueue(label: "com.local.gleam.power", qos: .utility)
     private var timer: Timer?
     private var source: CFRunLoopSource?
     /// 设备通知仅在监控运行且屏幕解锁、系统唤醒时持有；暂停后释放，恢复时重新订阅。

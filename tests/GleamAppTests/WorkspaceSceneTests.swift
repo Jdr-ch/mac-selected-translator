@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import Testing
-@testable import SelectedTextTranslatorApp
+@testable import GleamApp
 
 /// 场景持久化、几何适配和桌面身份规则；真机探针仅在显式环境变量启用时运行。
 struct WorkspaceSceneTests {
@@ -20,17 +20,20 @@ struct WorkspaceSceneTests {
         #expect(smaller.contains(WorkspaceGeometry.absolute(relative, in: smaller)))
     }
 
-    @Test func desktopNameSurvivesDeletionAndRecreation() throws {
+    @Test func desktopIdentityIgnoresOrdinal() throws {
         let saved = desktop()
         let afterRestart = desktop(spaceID: 900)
         #expect(try WorkspaceGeometry.resolve(saved, in: [afterRestart]).spaceID == 900)
-        #expect(try WorkspaceGeometry.resolve(saved, in: [desktop(id: "other")]).id == "other")
-        var movedName = saved
-        movedName.ordinal = 4
-        #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [movedName]) }
+        #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [desktop(id: "other")]) }
+        var movedPosition = afterRestart
+        movedPosition.ordinal = 4
+        #expect(try WorkspaceGeometry.resolve(saved, in: [movedPosition]).spaceID == 900)
         var anotherDisplay = saved
         anotherDisplay.displayID = "display-b"
         #expect(throws: WorkspaceError.self) { try WorkspaceGeometry.resolve(saved, in: [anotherDisplay]) }
+        var sameOrdinalOnAnotherDisplay = saved
+        sameOrdinalOnAnotherDisplay.displayID = "display-b"
+        #expect(saved.selectionKey != sameOrdinalOnAnotherDisplay.selectionKey)
     }
 
     @Test func incompleteSavePreservesExistingScene() throws {
@@ -149,9 +152,11 @@ struct WorkspaceSceneTests {
         _ = NSApplication.shared
         let catalog = WorkspaceWindowCatalog()
         let desktops = try catalog.desktop.desktops()
-        let targetSpaces = Set(desktops.filter { [3, 4, 5].contains($0.ordinal) }.map(\.spaceID))
+        let byDisplay = Dictionary(grouping: desktops, by: \.displayID)
+        #expect(byDisplay.values.allSatisfy { Set($0.map(\.ordinal)) == Set(1...$0.count) })
+        let targetSpaces = Set(desktops.map(\.spaceID))
         let actual = try await catalog.windows(in: targetSpaces)
-        print("Desktop mapping:", desktops.map { "\($0.ordinal)=\($0.spaceID)" })
+        print("Desktop mapping:", desktops.map { "\($0.displayID)#\($0.ordinal)=\($0.spaceID)" })
         for app in NSWorkspace.shared.runningApplications where ["com.google.Chrome", "com.jetbrains.WebStorm"].contains(app.bundleIdentifier ?? "") {
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             let elements: [AXUIElement] = WorkspaceWindowCatalog.read(ax, kAXWindowsAttribute) ?? []
@@ -174,6 +179,7 @@ struct WorkspaceSceneTests {
         }
         print("Captured IDs:", actual.map(\.id))
         #expect(!expected.isEmpty)
-        #expect(expected.isSubset(of: Set(actual.map(\.id))))
+        let unresolved = Set(catalog.unresolved.map(\.id))
+        #expect(expected.subtracting(unresolved).isSubset(of: Set(actual.map(\.id))))
     }
 }

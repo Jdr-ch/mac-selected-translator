@@ -33,21 +33,22 @@ final class WorkspaceDesktopCompletion {
     }
 }
 
-/// 仅处理本场景已恢复且仍在目标桌面的窗口；不对其他桌面或临时出现在当前桌面的窗口执行布局。
+/// 仅处理本场景已恢复且仍在目标桌面的窗口；目标 Space 由恢复准备阶段显式传入，不再按保存序号查找。
 @MainActor
 enum WorkspaceDesktopAlignment {
-    static func align(_ desktop: WorkspaceDesktop, windows: [WorkspaceWindow], outcomes: [WorkspaceOutcome]) async throws {
+    static func align(_ desktop: WorkspaceDesktop, target: WorkspaceDesktop,
+                      windows: [WorkspaceWindow], outcomes: [WorkspaceOutcome]) async throws {
         let catalog = WorkspaceWindowCatalog()
-        let target = try WorkspaceGeometry.resolve(desktop, in: catalog.desktop.desktops())
+        let currentTarget = try WorkspaceGeometry.resolve(target, in: catalog.desktop.desktops())
         let entries = windows.filter { $0.desktop.selectionKey == desktop.selectionKey }
-        let available = try await catalog.windows(in: [target.spaceID])
-        let selected = try matchingWindows(entries, outcomes: outcomes, available: available, spaceID: target.spaceID)
-        let frames = try WindowLayoutController().alignRestoredWindows(selected, in: target.screenFrame)
+        let available = try await catalog.windows(in: [currentTarget.spaceID])
+        let selected = try matchingWindows(entries, outcomes: outcomes, available: available, spaceID: currentTarget.spaceID)
+        let frames = try WindowLayoutController().alignRestoredWindows(selected, in: currentTarget.screenFrame)
         // AX 写入可能延迟生效；仅回读目标窗口，不重写、不再对齐，超时可单独重试对齐。
         let deadline = Date().addingTimeInterval(5)
         while true {
             let valid = try zip(selected, frames).allSatisfy { window, frame in
-                guard try catalog.desktop.spaces(for: window.id) == [target.spaceID],
+                guard try catalog.desktop.spaces(for: window.id) == [currentTarget.spaceID],
                       let current = WorkspaceWindowCatalog.frame(window.element) else { return false }
                 return WorkspaceWindowCatalog.distance(current, frame) <= 8
             }
