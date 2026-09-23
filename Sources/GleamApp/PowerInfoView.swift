@@ -5,6 +5,7 @@ import AppKit
 final class PowerInfoView: NSVisualEffectView {
     var onShowPowerChange: ((Bool) -> Void)?
     var onShowPowerHistory: (([PowerHistorySample], NSView) -> Void)?
+    var onShowBatteryHistory: (([BatteryHistorySample], NSView) -> Void)?
     private let percentage = NSTextField(labelWithString: "—")
     private let status = NSTextField(labelWithString: "电源状态暂不可用")
     private let adapter = NSTextField(wrappingLabelWithString: "暂不可用")
@@ -18,12 +19,14 @@ final class PowerInfoView: NSVisualEffectView {
     private let chargingLabel = NSTextField(labelWithString: "电池充电功率")
     private let inputRows = NSStackView()
     private let inputPowerRow = PowerMetricRowView(label: "系统输入功率")
+    private let batteryStateRow = PowerMetricRowView(label: "电池状态")
     private var batteryRow: NSView!
     private var chargingRow: NSView!
     private let powerCheckbox = NSButton(checkboxWithTitle: "功率", target: nil, action: nil)
     private var lastPresentation: PowerPresentation?
     private var currentState = PowerState.unavailable
     private var history: [PowerHistorySample] = []
+    private var batteryHistory: [BatteryHistorySample] = []
 
     init(showPower: Bool) {
         super.init(frame: .zero)
@@ -94,6 +97,14 @@ final class PowerInfoView: NSVisualEffectView {
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
+        batteryStateRow.isInteractive = true
+        batteryStateRow.toolTip = "查看最近两小时电量与充电时段"
+        batteryStateRow.onActivate = { [weak self] in
+            guard let self else { return }
+            self.onShowBatteryHistory?(self.batteryHistory, self.batteryStateRow)
+        }
+        stack.addArrangedSubview(batteryStateRow)
+        batteryStateRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
         stack.addArrangedSubview(spacer)
@@ -112,6 +123,7 @@ final class PowerInfoView: NSVisualEffectView {
     /// 只有可见文案变化才设置文本；电量条使用真实百分比，不制造周期动画。
     func update(snapshot: PowerSnapshot, presentation: PowerPresentation, history: [PowerHistorySample] = []) {
         level.fraction = (snapshot.batteryPercent ?? 0) / 100
+        updateHistory(history)
         guard lastPresentation != presentation else { return }
         lastPresentation = presentation
         currentState = presentation.state
@@ -124,21 +136,25 @@ final class PowerInfoView: NSVisualEffectView {
         inputPowerRow.value = presentation.inputWatts
         inputPowerRow.isInteractive = presentation.showAdapter && snapshot.inputWatts?.isFinite == true
         batteryRow.isHidden = !presentation.showBattery
-        chargingRow.isHidden = !presentation.showAdapter
+        chargingRow.isHidden = presentation.state != .charging
+        batteryStateRow.value = presentation.state.title
         contractValue.stringValue = presentation.contract
         inputVoltageValue.stringValue = presentation.inputVoltage
         inputWattsValue.stringValue = presentation.inputWatts
         batteryVoltageValue.stringValue = presentation.batteryVoltage
-        chargingLabel.stringValue = presentation.state == .charging ? "电池充电功率" : "电池状态"
-        chargingValue.stringValue = presentation.state == .charging ? presentation.chargingWatts : presentation.state.title
-        chargingValue.toolTip = presentation.state == .charging ? "按电池包电压 × 电池电流估算；系统输入功率包含电脑运行消耗。" : nil
-        updateHistory(history)
+        chargingValue.stringValue = presentation.chargingWatts
+        chargingValue.toolTip = "按电池包电压 × 电池电流估算；系统输入功率包含电脑运行消耗。"
         refreshColor()
     }
 
     /// 采样器可在快照未变化时追加历史点；只更新图表数据，不重复布局电源字段。
     func updateHistory(_ history: [PowerHistorySample]) {
         self.history = history
+    }
+
+    /// 缓存由统一采样器推送，拔电和暂无数据时仍允许打开历史浮层。
+    func updateBatteryHistory(_ history: [BatteryHistorySample]) {
+        batteryHistory = history
     }
 
     /// 点击输入功率行请求外置图表；图表由上层控制器锚定到主面板左侧。
@@ -229,6 +245,13 @@ private final class PowerMetricRowView: NSView {
     override func mouseExited(with event: NSEvent) { hovering = false }
     override func keyDown(with event: NSEvent) {
         if isInteractive, event.keyCode == 36 || event.keyCode == 49 { onActivate?() } else { super.keyDown(with: event) }
+    }
+
+    /// 辅助功能与鼠标、键盘共用同一入口；不可交互的指标不接受按压动作。
+    override func accessibilityPerformPress() -> Bool {
+        guard isInteractive else { return false }
+        onActivate?()
+        return true
     }
 
     private func updateAppearance() {

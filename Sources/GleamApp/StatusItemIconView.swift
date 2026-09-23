@@ -1,10 +1,9 @@
 import AppKit
 import QuartzCore
 
-/// Shares one coordinate system between the native button image and its green-light hit region.
+/// 统一菜单栏图标与休眠状态圆点的绘制尺寸和动画周期；圆点不承担独立点击操作。
 enum StatusItemVisualStyle {
     static let iconSize = CGSize(width: 26, height: 22)
-    static let sleepIndicatorHitTargetWidth: CGFloat = 18
     static let sleepIndicatorDiameter: CGFloat = 8
     static let sleepIndicatorCenterOffset: CGFloat = -13
     static let iconCenterOffsetWhilePreventingSleep: CGFloat = 9
@@ -38,25 +37,6 @@ enum StatusItemVisualStyle {
     static func itemLength(statusBarThickness: CGFloat) -> CGFloat {
         statusBarThickness * 2
     }
-
-    /// Keeps the larger green-light target independent of its pulse, with the rest owned by AppKit.
-    static func hitTarget(at point: CGPoint, in size: CGSize, isPreventingSleep: Bool) -> StatusItemHitTarget {
-        guard CGRect(origin: .zero, size: size).contains(point) else {
-            return .outside
-        }
-        let indicatorCenter = size.width / 2 + sleepIndicatorCenterOffset
-        if isPreventingSleep,
-           abs(point.x - indicatorCenter) < sleepIndicatorHitTargetWidth / 2 {
-            return .sleepIndicator
-        }
-        return .menu
-    }
-}
-
-enum StatusItemHitTarget {
-    case outside
-    case menu
-    case sleepIndicator
 }
 
 /// 每个模块一种色相：弧色与 tile 皮肤都从这里取，只有通用忙碌才走完整四色色散。

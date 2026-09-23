@@ -222,13 +222,6 @@ struct PowerMonitorTests {
         let bounds = button.bounds
         let imageFrame = try #require(button.cell).imageRect(forBounds: bounds)
         #expect(imageFrame.width == 44 && imageFrame.minX > 60)
-        let indicatorPoint = CGPoint(x: imageFrame.midX - 13, y: imageFrame.midY)
-        #expect(StatusItemVisualStyle.hitTarget(at: indicatorPoint, buttonBounds: bounds,
-            imageFrame: imageFrame, isPreventingSleep: true) == .sleepIndicator)
-        #expect(StatusItemVisualStyle.hitTarget(at: CGPoint(x: 35, y: 12), buttonBounds: bounds,
-            imageFrame: imageFrame, isPreventingSleep: true) == .menu)
-        #expect(StatusItemVisualStyle.hitTarget(at: indicatorPoint, buttonBounds: bounds,
-            imageFrame: imageFrame, isPreventingSleep: false) == .menu)
         // 功率保留一位小数后相同则命中缓存；隐藏数字后，任意功率读数变化也不应重绘前缀。
         var sample = snapshot
         sample.state = .externalPower

@@ -33,7 +33,10 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
         }
         content.info.onShowPowerChange = { [weak self] showPower in self?.onShowPowerChange?(showPower) }
         content.info.onShowPowerHistory = { [weak self] samples, anchor in
-            self?.historyPopover.toggle(relativeTo: anchor, samples: samples)
+            self?.historyPopover.toggle(relativeTo: anchor, data: .systemInput(samples))
+        }
+        content.info.onShowBatteryHistory = { [weak self] samples, anchor in
+            self?.historyPopover.toggle(relativeTo: anchor, data: .battery(samples))
         }
     }
 
@@ -60,11 +63,18 @@ final class PowerPopoverController: NSObject, NSPopoverDelegate {
 
     func update(snapshot: PowerSnapshot, presentation: PowerPresentation, history: [PowerHistorySample]) {
         content.info.update(snapshot: snapshot, presentation: presentation, history: history)
-        if !presentation.showAdapter { historyPopover.close() }
+        if !presentation.showAdapter, historyPopover.metric == .systemInput { historyPopover.close() }
     }
 
     func updateHistory(_ history: [PowerHistorySample]) {
         content.info.updateHistory(history)
+        historyPopover.update(.systemInput(history))
+    }
+
+    /// 图表打开期间继续接收采样；电池浮层不因拔电而被关闭。
+    func updateBatteryHistory(_ history: [BatteryHistorySample]) {
+        content.info.updateBatteryHistory(history)
+        historyPopover.update(.battery(history))
     }
 
     func refreshCommands() { content.refreshCommands() }

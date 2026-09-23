@@ -16,7 +16,6 @@ struct WindowLayoutPlannerTests {
     func testStatusItemVisualStyleCombinesTranslationIconAndSleepLight() {
         #expect(StatusItemVisualStyle.itemLength(statusBarThickness: 22) == 44)
         #expect(StatusItemVisualStyle.iconSize == CGSize(width: 26, height: 22))
-        #expect(StatusItemVisualStyle.sleepIndicatorHitTargetWidth == 18)
         #expect(StatusItemVisualStyle.sleepIndicatorDiameter == 8)
         #expect(StatusItemVisualStyle.sleepIndicatorCenterOffset == -13)
         #expect(StatusItemVisualStyle.iconCenterOffsetWhilePreventingSleep == 9)
@@ -66,19 +65,6 @@ struct WindowLayoutPlannerTests {
         animator.isPreventingSleep = true
         let active = try #require(animator.image(at: 0, isDark: false, reduceMotion: true)?.tiffRepresentation)
         #expect(initial != active)
-    }
-
-    @Test
-    func statusIconRoutesOnlyActiveGreenLightAwayFromNativeMenu() {
-        for width: CGFloat in [44, 48, 64] {
-            let size = CGSize(width: width, height: 24)
-            let greenPoint = CGPoint(x: width / 2 - 13, y: 12)
-            let iconPoint = CGPoint(x: width / 2 + 9, y: 12)
-            #expect(StatusItemVisualStyle.hitTarget(at: greenPoint, in: size, isPreventingSleep: true) == .sleepIndicator)
-            #expect(StatusItemVisualStyle.hitTarget(at: greenPoint, in: size, isPreventingSleep: false) == .menu)
-            #expect(StatusItemVisualStyle.hitTarget(at: iconPoint, in: size, isPreventingSleep: true) == .menu)
-            #expect(StatusItemVisualStyle.hitTarget(at: CGPoint(x: -1, y: 12), in: size, isPreventingSleep: true) == .outside)
-        }
     }
 
     @Test

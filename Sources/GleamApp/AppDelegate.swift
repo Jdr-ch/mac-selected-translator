@@ -26,9 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     /// Updates the standard status-button image so AppKit can reuse it on every display's menu bar.
     private var statusIconAnimator: StatusItemIconAnimator?
-    /// 捕获原生按钮的来源应用，并保留独立休眠绿灯命中区域。
-    private var statusItemMouseMonitor: Any?
-    /// Retained so the status-menu label follows both the menu toggle and the green indicator.
+    /// 菜单开关和自动解除休眠后，标题始终跟随控制器的真实状态。
     private var sleepMenuItem: NSMenuItem?
     private var modelMenuItem: NSMenuItem?
     /// 电源模块独立采集与缓存，不参与 A/文动画的逐帧计算。
@@ -37,8 +35,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var powerPopover: PowerPopoverController?
     private var showMenuBarPower = PowerDisplayPreference.isPowerShown()
     private var powerPresentation = PowerPresentation(snapshot: PowerSnapshot(), showPower: true)
-    /// 鼠标按下时先捕获选区来源，避免弹出面板改变前台应用后再读取。
-    private var statusSourceCaptured = false
     /// Drives the faster icon rhythm for the lifetime of one translation request.
     private var isTranslating = false {
         didSet {
@@ -95,9 +91,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusIconAnimator?.stop()
         powerMonitor.stop()
         powerPopover?.close()
-        if let statusItemMouseMonitor {
-            NSEvent.removeMonitor(statusItemMouseMonitor)
-        }
         iphoneLocationWindowController.shutdown()
         flowchartWindowController?.shutdown()
         polishSelectionTask?.cancel()
@@ -119,6 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.setAccessibilityLabel("划词翻译")
             button.target = self
             button.action = #selector(toggleStatusPopover)
+            // 整个状态项统一打开面板；在按下时记录前台应用，圆点仅作为休眠状态指示。
+            button.sendAction(on: .leftMouseDown)
             setupStatusIcon(in: button, statusBarThickness: statusBar.thickness)
         }
 
@@ -166,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         powerMonitor.onChange = { [weak self] snapshot in self?.updatePowerSnapshot(snapshot) }
         powerMonitor.onHistoryChange = { [weak self] history in self?.powerPopover?.updateHistory(history) }
-        installStatusItemMouseMonitor()
+        powerMonitor.onBatteryHistoryChange = { [weak self] history in self?.powerPopover?.updateBatteryHistory(history) }
         updateSleepPreventionUI()
         updatePowerSnapshot(powerMonitor.snapshot)
         powerMonitor.start()
@@ -181,31 +176,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         animator.onAppearanceChange = { [weak self] in self?.updatePowerStatusButton() }
         animator.start()
         statusIconAnimator = animator
-    }
-
-    /// 保留原生按钮事件链，只消费当前图片中的休眠绿灯；新增标题区域一律打开面板。
-    private func installStatusItemMouseMonitor() {
-        statusItemMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
-            [weak self] event in
-            guard let self,
-                  let button = self.statusItem?.button,
-                  event.window === button.window else {
-                return event
-            }
-
-            let point = button.convert(event.locationInWindow, from: nil)
-            guard button.bounds.contains(point) else { return event }
-            if self.powerPopover?.isShown != true {
-                self.menuSourceApplication = NSWorkspace.shared.frontmostApplication
-                self.statusSourceCaptured = true
-            }
-            let imageFrame = button.cell?.imageRect(forBounds: button.bounds) ?? .zero
-            guard StatusItemVisualStyle.hitTarget(at: point, buttonBounds: button.bounds, imageFrame: imageFrame,
-                isPreventingSleep: self.sleepPreventionController.isPreventingSleep) == .sleepIndicator else { return event }
-            self.statusSourceCaptured = false
-            self.restoreSleepFromStatusIndicator()
-            return nil
-        }
     }
 
     /// Registers only a packaged app so development executables never become persistent login items.
@@ -264,13 +234,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.setAccessibilityLabel(description)
     }
 
-    /// 原生按钮的 target-action 打开同一面板，辅助功能触发时也先记录来源应用。
+    /// 鼠标按下或辅助功能激活后、面板改变焦点前，记录选区来源应用。
     @objc private func toggleStatusPopover() {
         guard let button = statusItem?.button else { return }
-        if powerPopover?.isShown != true, !statusSourceCaptured {
+        if powerPopover?.isShown != true {
             menuSourceApplication = NSWorkspace.shared.frontmostApplication
         }
-        statusSourceCaptured = false
         powerPopover?.toggle(relativeTo: button)
     }
 
@@ -373,14 +342,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Toggles the process-level sleep assertion and updates the menu action title.
     @objc private func toggleSleepPrevention() {
         sleepPreventionController.toggle()
-    }
-
-    /// Restores normal sleep immediately when the user clicks the green status light.
-    @objc private func restoreSleepFromStatusIndicator() {
-        guard sleepPreventionController.isPreventingSleep else {
-            return
-        }
-        sleepPreventionController.restoreSystemSleep()
     }
 
     /// Runs one menu-triggered layout command and surfaces permission or window-selection failures.

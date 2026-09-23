@@ -126,14 +126,3 @@ private final class PowerStatusAttachmentCell: NSTextAttachmentCell {
                    respectFlipped: true, hints: nil)
     }
 }
-
-extension StatusItemVisualStyle {
-    /// 标题变宽后，以原生 cell 返回的图片坐标识别绿灯，不再把整只按钮中心当作图标中心。
-    static func hitTarget(at point: CGPoint, buttonBounds: CGRect, imageFrame: CGRect,
-                          isPreventingSleep: Bool) -> StatusItemHitTarget {
-        guard buttonBounds.contains(point) else { return .outside }
-        guard imageFrame.contains(point) else { return .menu }
-        return hitTarget(at: CGPoint(x: point.x - imageFrame.minX, y: point.y - imageFrame.minY),
-                         in: imageFrame.size, isPreventingSleep: isPreventingSleep)
-    }
-}

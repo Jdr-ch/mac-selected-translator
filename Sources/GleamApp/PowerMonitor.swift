@@ -10,8 +10,10 @@ final class PowerMonitor {
     nonisolated static let batteryStatusChangedMessage: UInt32 = 0xe0024100
     var onChange: ((PowerSnapshot) -> Void)?
     var onHistoryChange: (([PowerHistorySample]) -> Void)?
+    var onBatteryHistoryChange: (([BatteryHistorySample]) -> Void)?
     private(set) var snapshot = PowerSnapshot()
     private(set) var history = PowerHistory()
+    private(set) var batteryHistory = BatteryHistory()
     private(set) var sampleCount = 0
     private(set) var interval: TimeInterval?
     private let read: @Sendable () -> PowerSnapshot
@@ -63,6 +65,7 @@ final class PowerMonitor {
 
     /// 停止后丢弃在途读取的结果；解除通知与计时器，避免退出后继续回调界面。
     func stop() {
+        batteryHistory.breakContinuity()
         isRunning = false
         observesSystem = false
         generation += 1
@@ -90,6 +93,7 @@ final class PowerMonitor {
     func setSuspended(sleeping: Bool? = nil, locked: Bool? = nil) {
         if let sleeping { self.sleeping = sleeping }
         if let locked { self.locked = locked }
+        if self.sleeping || self.locked { batteryHistory.breakContinuity() }
         updateBatteryNotifications()
         updateTimer()
         if !self.sleeping && !self.locked { refresh() }
@@ -154,8 +158,13 @@ final class PowerMonitor {
                 self.isReading = false
                 self.sampleCount += 1
                 if !self.sleeping && !self.locked {
+                    let sampledAt = Date()
+                    // 电池历史不依赖外部输入功率；同一快照未变化时也按时间继续记录。
+                    if self.batteryHistory.append(snapshot: value, at: sampledAt) {
+                        self.onBatteryHistoryChange?(self.batteryHistory.samples)
+                    }
                     if let watts = value.inputWatts,
-                       self.history.append(watts: watts, at: Date()) {
+                       self.history.append(watts: watts, at: sampledAt) {
                         self.onHistoryChange?(self.history.samples)
                     }
                     if self.snapshot != value {
