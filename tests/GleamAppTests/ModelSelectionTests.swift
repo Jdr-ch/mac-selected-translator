@@ -79,6 +79,30 @@ struct ModelSelectionTests {
         #expect(session.phase == .failed("配置读取失败"))
     }
 
+    /// 回复的旧服务和校验错误必须保持可执行提示，不能误报成 JSON 解码问题。
+    @Test
+    func replyReportsOldBackendAndActionableErrors() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ModelTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); ModelTestURLProtocol.respond = nil; ModelTestURLProtocol.status = nil }
+        var status = 404
+        ModelTestURLProtocol.status = { $0.url?.path == "/reply" ? status : 200 }
+        ModelTestURLProtocol.respond = { request in
+            Data((request.url?.path == "/health" ? #"{"request_timeout_seconds":120}"# : #"{"error":"请填写对方角色。"}"#).utf8)
+        }
+        let client = BackendClient(urlSession: session)
+        for code in [404, 400, 504] {
+            status = code
+            do {
+                _ = try await client.reply(.init(text: "问题", preferences: .init()), provider: .codex, reasoning: .medium)
+                Issue.record("错误 HTTP 状态不得当作成功回复")
+            } catch {
+                #expect(error.localizedDescription.contains(code == 404 ? "重启本地服务" : "请填写对方角色"))
+            }
+        }
+    }
+
     @Test
     func httpRequestsCarryProviderAndRejectOldServiceCapabilities() async throws {
         let configuration = URLSessionConfiguration.ephemeral
@@ -94,6 +118,7 @@ struct ModelSelectionTests {
                 return Data("{\"capabilities\":[\"model-switching\",\"reasoning-selection\",\"generation-metrics\",\"translation-streaming\"],\"request_timeout_seconds\":\(modelTimeout)}".utf8)
             case "/models/codex": return Data(#"{"provider":"codex","model":"configured-model","source":"~/.codex/config.toml"}"#.utf8)
             case "/translate": return Data((#"{"type":"complete","translation":"译文","ai_ms":10500}"# + "\n").utf8)
+            case "/reply": return Data(#"{"reply_text":"建议回复","ai_ms":4200}"#.utf8)
             case "/flowchart":
                 var response: [String: Any] = ["model": "configured-model", "ai_ms": 10]
                 response["diagram"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FlowchartDocument.example))
@@ -110,6 +135,14 @@ struct ModelSelectionTests {
         let polished = try await client.polish(.init(text: "原文", preferences: .init()), provider: .qwen, reasoning: .thinking)
         #expect(polished.text == "润色结果")
         #expect(polished.completion.status("已润色") == "已润色·qwen-深度思考 2.3秒")
+        let reply = try await client.reply(.init(text: "对方原文", preferences: .init()), provider: .codex, reasoning: .medium)
+        #expect(reply.text == "建议回复")
+        #expect(reply.completion.status("已回复") == "已回复·codex-中 4.2秒")
+        let replyRequest = try #require(requests.last)
+        #expect(replyRequest.timeoutInterval == 185)
+        let replyBody = try #require(JSONSerialization.jsonObject(with: ModelTestURLProtocol.body(of: replyRequest)) as? [String: String])
+        #expect(replyBody == ["text": "对方原文", "my_role": "前端开发工程师", "other_role": "同事",
+                              "scenario": "办公", "tone": "professional", "provider": "codex", "reasoning": "medium"])
         let flowchart = FlowchartClient(configuration: AppConfiguration(), urlSession: urlSession)
         for provider in ModelProvider.allCases {
             #expect(try await flowchart.generate(text: "流程描述", provider: provider,
@@ -215,6 +248,8 @@ struct ModelSelectionTests {
 /// Intercepts every test URL before networking; request bodies may be delivered as streams by URLSession.
 private final class ModelTestURLProtocol: URLProtocol {
     static var respond: ((URLRequest) throws -> Data)?
+    /// 默认成功；单个错误协议用例可对 /reply 独立指定状态，不影响健康检查。
+    static var status: ((URLRequest) -> Int)?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -224,7 +259,7 @@ private final class ModelTestURLProtocol: URLProtocol {
             var request = request
             request.httpBody = Self.body(of: request)
             let data = try Self.respond!(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+            let response = HTTPURLResponse(url: request.url!, statusCode: Self.status?(request) ?? 200, httpVersion: nil,
                                            headerFields: ["Content-Type": request.url?.path == "/translate"
                                                ? "application/x-ndjson" : "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

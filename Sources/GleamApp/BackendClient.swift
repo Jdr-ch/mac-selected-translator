@@ -3,6 +3,7 @@ import Foundation
 struct BackendClient {
     private let endpoint: URL
     private let polishEndpoint: URL
+    private let replyEndpoint: URL
     private let modelsEndpoint: URL
     private let healthURL: URL
     private let urlSession: URLSession
@@ -10,6 +11,7 @@ struct BackendClient {
     init(configuration: AppConfiguration = AppConfiguration(), urlSession: URLSession = .shared) {
         self.endpoint = configuration.translateURL
         self.polishEndpoint = configuration.backendBaseURL.appendingPathComponent("polish")
+        self.replyEndpoint = configuration.backendBaseURL.appendingPathComponent("reply")
         self.modelsEndpoint = configuration.backendBaseURL.appendingPathComponent("models")
         self.healthURL = configuration.healthURL
         self.urlSession = urlSession
@@ -116,6 +118,36 @@ struct BackendClient {
         } catch {
             if Task.isCancelled { throw CancellationError() }
             throw TranslatorAppError.backendError("无法完成润色请求：\(error.localizedDescription)")
+        }
+    }
+
+    /// 双方身份在 /reply 中保持方向；与润色共用运行时超时、模型信息和错误协议。
+    func reply(_ payload: ReplyRequest, provider: ModelProvider, reasoning: ModelReasoning) async throws -> ModelTextResult {
+        var request = URLRequest(url: replyEndpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = try await BackendRequestTimeout.load(from: healthURL, modelCalls: 1, session: urlSession)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            ReplyRequest(text: payload.text, preferences: payload.preferences, provider: provider, reasoning: reasoning)
+        )
+        do {
+            let (data, response) = try await urlSession.data(for: request)
+            guard let response = response as? HTTPURLResponse else { throw TranslatorAppError.invalidBackendResponse }
+            if response.statusCode == 404 {
+                throw TranslatorAppError.backendError("当前本地服务尚未支持智能回复，请重启本地服务后重试。")
+            }
+            guard (200..<300).contains(response.statusCode) else {
+                let message = try? JSONDecoder().decode(ErrorResponse.self, from: data).error
+                throw TranslatorAppError.backendError(message ?? "回复服务返回 HTTP \(response.statusCode)。")
+            }
+            let result = try JSONDecoder().decode(ReplyResponse.self, from: data)
+            return ModelTextResult(text: result.replyText,
+                                   completion: ModelCompletion(provider: provider, reasoning: reasoning, aiMS: result.aiMS))
+        } catch let error as TranslatorAppError {
+            throw error
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw TranslatorAppError.backendError("无法生成回复：\(error.localizedDescription)")
         }
     }
 

@@ -44,13 +44,13 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        """Route flowcharts, translation, and polishing through separate model policies."""
+        """翻译、润色和回复各用独立策略，共用模型选择、计时及错误协议。"""
 
         if self.path == "/flowchart":
             self._generate_flowchart()
             return
 
-        if self.path not in ("/translate", "/polish"):
+        if self.path not in ("/translate", "/polish", "/reply"):
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
 
@@ -70,6 +70,13 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
                         text, payload.get("role"), payload.get("scenario"), payload.get("tone")
                     )
                 }
+            elif self.path == "/reply":
+                result = {
+                    "reply_text": agent.reply(
+                        text, payload.get("my_role"), payload.get("other_role"),
+                        payload.get("scenario"), payload.get("tone")
+                    )
+                }
             else:
                 target_language = payload.get("target_language")
                 result = {"translation": agent.translate(text, target_language)}
@@ -81,7 +88,7 @@ class TranslatorRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         except Exception:  # Provider exceptions can contain endpoint credentials or request data.
-            operation = "润色" if self.path == "/polish" else "翻译"
+            operation = {"/polish": "润色", "/reply": "回复", "/translate": "翻译"}[self.path]
             self._send_json({"error": f"{operation}请求失败，请检查所选模型的连接和认证配置。"},
                             HTTPStatus.BAD_GATEWAY)
             return

@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Created on first use so the diagram renderer does not delay the menu-bar app's startup.
     private var flowchartWindowController: FlowchartWindowController?
     private let polishWindowController: ContentPolishWindowController
+    private let replyWindowController: SmartReplyWindowController
     /// Captured before native menu tracking changes focus; never infer the source from the new panel.
     private var menuSourceApplication: NSRunningApplication?
     private var polishSelectionTask: Task<Void, Never>?
@@ -67,6 +68,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try Task.checkCancellation()
             return try await client.polish(request, provider: provider, reasoning: reasoning)
         })
+        self.replyWindowController = SmartReplyWindowController(session: SmartReplySession { request in
+            let provider = selection.provider
+            let reasoning = selection.reasoning(for: provider)
+            try await supervisor.ensureBackendRunning()
+            try Task.checkCancellation()
+            return try await client.reply(request, provider: provider, reasoning: reasoning)
+        })
         super.init()
         floatingPanel.onDismiss = { [weak self] in self?.translationTask?.cancel() }
         selection.onChange = { [weak self] in self?.updateModelMenu() }
@@ -96,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         polishSelectionTask?.cancel()
         translationTask?.cancel()
         polishWindowController.session.cancel()
+        replyWindowController.session.cancel()
         modelWindowController.session.cancel()
         sleepPreventionController.restoreSystemSleep()
         backendSupervisor.terminateOwnedBackend()
@@ -139,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeMenuItem(title: "iPhone 定位", action: #selector(showIPhoneLocation)))
         menu.addItem(makeMenuItem(title: "生成流程图", action: #selector(showFlowchart)))
         menu.addItem(makeMenuItem(title: "内容润色", action: #selector(showContentPolish)))
+        menu.addItem(makeMenuItem(title: "智能回复", action: #selector(showSmartReply)))
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "测试弹窗", action: #selector(showTestPopover)))
         menu.addItem(makeMenuItem(title: "查看快捷键状态", action: #selector(showHotkeyStatus)))
@@ -380,13 +390,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let sourceApplication = menuSourceApplication
         if sourceApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
-            polishWindowController.reveal(on: screen)
+            // 从本应用唤起只保留可见草稿，不把已关闭窗口的旧原文当作新选区。
+            if polishWindowController.window?.isVisible == true {
+                polishWindowController.reveal(on: screen)
+            } else {
+                polishWindowController.show(sourceText: "", on: screen,
+                                            captureError: "未读取到选中文字，可在原文区域粘贴内容。")
+            }
             return
         }
         polishSelectionTask = Task { @MainActor in
             defer { polishSelectionTask = nil }
             do {
-                let text = try await selectionReader.readSelectedText(from: sourceApplication)
+                let text = try await selectionReader.readSelectedText(from: sourceApplication, restoreSourceFocus: true)
                 guard !Task.isCancelled else { return }
                 polishWindowController.show(sourceText: text, on: screen)
             } catch {
@@ -400,6 +416,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 polishWindowController.show(sourceText: "", on: screen, captureError: message)
             }
         }
+    }
+
+    /// 回复入口不读选区、不自动请求；可见窗口保留草稿，重新打开则清空文本。
+    @objc private func showSmartReply() {
+        polishSelectionTask?.cancel()
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        replyWindowController.show(on: screen)
     }
 
     /// Shows the floating panel without reading selection or calling the model.

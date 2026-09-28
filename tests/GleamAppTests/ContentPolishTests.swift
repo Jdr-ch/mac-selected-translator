@@ -111,8 +111,10 @@ struct ContentPolishTests {
         #expect(controller.scenarioField.stringValue == "办公")
         #expect(controller.tonePicker.itemTitles == PolishTone.allCases.map(\.title))
         #expect(controller.tonePicker.titleOfSelectedItem == "专业清晰")
-        #expect(controller.copyButton.title.isEmpty)
-        #expect(controller.copyButton.imagePosition == .imageOnly)
+        #expect(controller.copyButton.title == "复制")
+        #expect(controller.copyButton.imagePosition == .imageLeading)
+        #expect(content is NSVisualEffectView)
+        #expect(content.layer?.cornerRadius == 12)
         let closeButton = try #require(content.subviews.compactMap { $0 as? NSButton }.first { $0.toolTip == "关闭" })
         #expect(closeButton.title.isEmpty)
         session.open(sourceText: "商品列表页写完了，库存接口好了叫我一下，我再联调和自测。")
@@ -122,8 +124,8 @@ struct ContentPolishTests {
         #expect(controller.statusLabel.stringValue == "已润色·codex-中 10.5秒")
         #expect(!controller.resultView.isEditable)
         #expect(controller.sourceView.isEditable)
-        for width in [680.0, 600.0] {
-            window.setContentSize(NSSize(width: width, height: 540))
+        for (width, height) in [(680.0, 600.0), (600.0, 560.0)] {
+            window.setContentSize(NSSize(width: width, height: height))
             content.layoutSubtreeIfNeeded()
             for view in [controller.roleField, controller.scenarioField, controller.tonePicker,
                          controller.runButton, controller.copyButton, controller.statusLabel] {
@@ -152,7 +154,7 @@ struct ContentPolishTests {
 
         // Optional offscreen rendering supports visual inspection without launching the installed app.
         if let path = ProcessInfo.processInfo.environment["POLISH_PREVIEW_PATH"] {
-            window.setContentSize(NSSize(width: 680, height: 540))
+            window.setContentSize(NSSize(width: 680, height: 600))
             content.layoutSubtreeIfNeeded()
             let bitmap = try #require(content.bitmapImageRepForCachingDisplay(in: content.bounds))
             content.cacheDisplay(in: content.bounds, to: bitmap)
@@ -254,6 +256,33 @@ struct ContentPolishTests {
         controller.focusSourceText()
         #expect(panel.firstResponder === controller.sourceView)
         #expect(controller.sourceView.selectedRange() == NSRange(location: 0, length: 0))
+    }
+
+    @Test
+    func openingSelectionAutomaticallySubmitsOnceAndEmptyCaptureDoesNotSubmit() async throws {
+        _ = NSApplication.shared
+        let suite = "ContentPolishTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var requests: [PolishRequest] = []
+        let session = ContentPolishSession(defaults: defaults) { request in
+            requests.append(request)
+            return Self.output("润色结果")
+        }
+        let controller = ContentPolishWindowController(session: session)
+        defer { controller.close() }
+        controller.show(sourceText: " 新选中文字 ", on: nil)
+        for _ in 0..<100 where session.isLoading { await Task.yield() }
+        #expect(requests.count == 1)
+        #expect(requests.first?.text == "新选中文字")
+        #expect(controller.sourceView.string == " 新选中文字 ")
+        controller.reveal(on: nil)
+        #expect(requests.count == 1)
+        controller.show(sourceText: "", on: nil, captureError: "未读取到选中文字")
+        #expect(session.result == nil)
+        #expect(session.phase == .error("未读取到选中文字"))
+        #expect(!controller.runButton.isEnabled)
+        #expect(requests.count == 1)
     }
 
     @Test

@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from openai import APITimeoutError
 
 from .polishing import polish_messages
+from .replying import reply_messages
 
 
 
@@ -100,6 +101,16 @@ class TranslatorAgent:
         content = self._coerce_content(response.content).strip()
         if not content:
             raise TranslationError("模型返回了空润色结果，请重试。")
+        return content
+
+    def reply(self, text: str, my_role: object, other_role: object,
+              scenario: object, tone: object) -> str:
+        """复用当前模型生成双方身份下的回复，空结果不作为成功响应交付。"""
+        messages = reply_messages(text, my_role, other_role, scenario, tone)
+        response = self._request_model(messages)
+        content = self._coerce_content(response.content).strip()
+        if not content:
+            raise TranslationError("模型返回了空回复，请重试。")
         return content
 
     @classmethod
