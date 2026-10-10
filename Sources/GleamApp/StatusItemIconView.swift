@@ -15,6 +15,9 @@ enum StatusItemVisualStyle {
     static let translatingOrbitDuration: TimeInterval = 0.9
     static let sleepPulseDuration: TimeInterval = 1.3
     static let sleepPulseScale: CGFloat = 2.15
+    /// 复杂动效保持 30 帧；只有 8pt 圆点在脉冲时采用 15 帧，周期仍按实际经过时间计算。
+    static let animationFrameInterval: TimeInterval = 1 / 30
+    static let sleepPulseFrameInterval: TimeInterval = 1 / 15
 
     /// 色散动效：合拢 → 色散 → 绕转 → 收拢，对应 App 图标「一道光被拆成几束」的语言。
     static let dispersionCollapseDuration: TimeInterval = 0.18
@@ -235,7 +238,10 @@ final class StatusItemIconAnimator: NSObject {
     /// 空闲时是否保留 A/文 互换。默认关闭：空闲不再逐帧重绘，动画全部由状态切换驱动。
     var idleExchangeEnabled = false
 
+    /// 最近已发布的深浅主题；AppKit 的重复外观通知不能再次触发图片赋值。
     private var lastDarkAppearance: Bool?
+    /// 字体和字形固定，按主题缓存 A/文 的属性及 point 尺寸，供所有动画帧复用。
+    private var textGlyphLayouts: [Bool: [String: TextGlyphLayout]] = [:]
     private weak var button: NSStatusBarButton?
     private let imageSize: CGSize
     private var frameTimer: Timer?
@@ -289,7 +295,7 @@ final class StatusItemIconAnimator: NSObject {
         updateImage()
         // 减少动态效果会停掉帧计时器，仍需通过外观事件更新静态电源图标。
         appearanceObservation = button?.observe(\.effectiveAppearance) { [weak self] _, _ in
-            Task { @MainActor in self?.updateImage() }
+            Task { @MainActor in self?.updateAppearanceIfNeeded() }
         }
         NotificationCenter.default.addObserver(
             self,
@@ -325,11 +331,15 @@ final class StatusItemIconAnimator: NSObject {
     /// Common run-loop modes keep the animation alive while the native menu is tracking clicks.
     private func updateTimer() {
         let shouldRun = needsAnimation
-        if shouldRun, frameTimer != nil { return }
+        // 切入工作动效或收尾时恢复完整帧率，不能复用空闲圆点的低频定时器。
+        let interval = animationState.isActive || settleStart != nil || idleExchangeEnabled
+            ? StatusItemVisualStyle.animationFrameInterval
+            : StatusItemVisualStyle.sleepPulseFrameInterval
+        if shouldRun, frameTimer?.timeInterval == interval { return }
         frameTimer?.invalidate()
         frameTimer = nil
         guard shouldRun else { return }
-        let timer = Timer(timeInterval: 1 / 30, target: self, selector: #selector(updateImage), userInfo: nil, repeats: true)
+        let timer = Timer(timeInterval: interval, target: self, selector: #selector(updateImage), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         frameTimer = timer
     }
@@ -339,10 +349,21 @@ final class StatusItemIconAnimator: NSObject {
         updateImage()
     }
 
+    /// 图片赋值会间接引发外观通知；只重绘真正变更的主题，截断通知与重绘的反馈循环。
+    private func updateAppearanceIfNeeded() {
+        // stop() 后可能仍有已排队的 KVO 任务，不能让其重新发布图片。
+        guard appearanceObservation != nil, let button else { return }
+        let isDark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        guard lastDarkAppearance != isDark else { return }
+        updateImage()
+    }
+
+    /// 状态和动画帧统一从这里发布；固定尺寸图片复用对象，避免逐帧触发菜单栏宽度重算。
     @objc private func updateImage() {
         guard let button else { return }
         let isDark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        if lastDarkAppearance != isDark {
+        let appearanceChanged = lastDarkAppearance != isDark
+        if appearanceChanged {
             lastDarkAppearance = isDark
             onAppearanceChange?()
         }
@@ -351,11 +372,23 @@ final class StatusItemIconAnimator: NSObject {
             settlingFrom = nil
             updateTimer()
         }
-        button.image = image(
+        guard let frame = image(
             at: CACurrentMediaTime() - animationStart,
             isDark: isDark,
             reduceMotion: reduceMotion
-        )
+        ) else { return }
+        // 原生图片保持同一尺寸；只使像素缓存失效和标记重绘，不重新设置 image 属性。
+        if !appearanceChanged, let published = button.image, published.size == frame.size {
+            for representation in published.representations {
+                published.removeRepresentation(representation)
+            }
+            published.addRepresentations(frame.representations)
+            published.recache()
+            button.needsDisplay = true
+        } else {
+            // 首帧、主题或尺寸变化才走 AppKit 的完整图片与布局更新。
+            button.image = frame
+        }
     }
 
     private func scheduleFailureReset() {
@@ -651,6 +684,7 @@ final class StatusItemIconAnimator: NSObject {
         }
     }
 
+    /// 按姿态绘制 tile；文字复用测量结果，保留原来的坐标、字体和即时矢量绘制精度。
     private func drawTile(
         in context: CGContext,
         spec: StatusItemTileSpec,
@@ -679,14 +713,10 @@ final class StatusItemIconAnimator: NSObject {
         context.setFillColor(ink.cgColor)
         switch spec.glyph {
         case .text(let value):
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 7, weight: .semibold),
-                .foregroundColor: ink
-            ]
-            let size = (value as NSString).size(withAttributes: attributes)
+            let layout = textGlyphLayout(for: value, isDark: isDark, ink: ink)
             (value as NSString).draw(
-                at: CGPoint(x: -size.width / 2, y: -size.height / 2),
-                withAttributes: attributes
+                at: CGPoint(x: -layout.size.width / 2, y: -layout.size.height / 2),
+                withAttributes: layout.attributes
             )
         case .windowGrid:
             let rects = [
@@ -714,6 +744,27 @@ final class StatusItemIconAnimator: NSObject {
             context.fillPath()
         }
         context.restoreGState()
+    }
+
+    /// 固定字形的颜色随主题变化，尺寸和字体属性在同一主题内无需逐帧重建。
+    private struct TextGlyphLayout {
+        let attributes: [NSAttributedString.Key: Any]
+        let size: CGSize
+    }
+
+    /// 首次遇到字形和主题时测量；后续帧直接复用，深浅主题的文字颜色各自缓存。
+    private func textGlyphLayout(for value: String, isDark: Bool, ink: NSColor) -> TextGlyphLayout {
+        if let layout = textGlyphLayouts[isDark]?[value] { return layout }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 7, weight: .semibold),
+            .foregroundColor: ink
+        ]
+        let layout = TextGlyphLayout(
+            attributes: attributes,
+            size: (value as NSString).size(withAttributes: attributes)
+        )
+        textGlyphLayouts[isDark, default: [:]][value] = layout
+        return layout
     }
 
     private func drawSleepIndicator(in context: CGContext, at elapsed: TimeInterval, isDark: Bool, reduceMotion: Bool) {

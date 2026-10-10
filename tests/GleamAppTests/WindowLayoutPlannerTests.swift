@@ -67,6 +67,81 @@ struct WindowLayoutPlannerTests {
         #expect(initial != active)
     }
 
+    /// 空闲图片不能被同主题通知反复替换，真正切换主题时仍须更新图片与电源前缀。
+    @MainActor
+    @Test
+    func statusIconAppearanceChangesDoNotCreateIdleRedrawLoop() async throws {
+        let item = NSStatusBar.system.statusItem(withLength: 44)
+        item.isVisible = false
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        let button = try #require(item.button)
+        button.appearance = NSAppearance(named: .aqua)
+        let animator = StatusItemIconAnimator(button: button, statusBarThickness: 22)
+        var appearanceChanges = 0
+        animator.onAppearanceChange = { appearanceChanges += 1 }
+        animator.start()
+        defer { animator.stop() }
+        let initial = try #require(button.image)
+
+        // 显式投递同主题 KVO 通知，复现 AppKit 因图片/布局变化而报告外观的场景。
+        for _ in 0..<20 {
+            notifyUnchangedStatusIconAppearance(button)
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(button.image === initial)
+        #expect(appearanceChanges == 1)
+
+        button.appearance = NSAppearance(named: .darkAqua)
+        try await Task.sleep(for: .milliseconds(50))
+        let darkImage = try #require(button.image)
+        #expect(darkImage !== initial)
+        #expect(darkImage.tiffRepresentation != initial.tiffRepresentation)
+        #expect(appearanceChanges == 2)
+
+        // 往返切换应恢复相同像素，缓存不能复用另一个主题的文字颜色。
+        button.appearance = NSAppearance(named: .aqua)
+        try await Task.sleep(for: .milliseconds(50))
+        let restored = try #require(button.image)
+        #expect(restored.tiffRepresentation == initial.tiffRepresentation)
+        #expect(appearanceChanges == 3)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(button.image === restored)
+    }
+
+    /// 分别覆盖空闲交换与低频休眠脉冲，真实动画像素更新不得替换图片或改变按钮几何。
+    @MainActor
+    @Test(arguments: [false, true])
+    func statusIconFramesUpdatePixelsWithoutReplacingNativeImage(pulseOnly: Bool) async throws {
+        let item = NSStatusBar.system.statusItem(withLength: 44)
+        item.isVisible = false
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        let button = try #require(item.button)
+        button.appearance = NSAppearance(named: .aqua)
+        let originalSubviews = button.subviews
+        let animator = StatusItemIconAnimator(button: button, statusBarThickness: 22)
+        animator.idleExchangeEnabled = !pulseOnly
+        animator.isPreventingSleep = pulseOnly
+        animator.start()
+        defer { animator.stop() }
+        let initial = try #require(button.image)
+        let initialPixels = try #require(initial.tiffRepresentation)
+        let imageFrame = try #require(button.cell).imageRect(forBounds: button.bounds)
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(button.image === initial)
+        #expect(button.image?.tiffRepresentation != initialPixels)
+        #expect(button.cell?.imageRect(forBounds: button.bounds) == imageFrame)
+        #expect(button.subviews == originalSubviews)
+        let bitmap = try #require(button.image?.representations.first as? NSBitmapImageRep)
+        #expect(bitmap.pixelsWide == 88 && bitmap.pixelsHigh == 44)
+    }
+
+    /// KVO 的成对通知必须在同步调用内完成，不能跨越异步测试的挂起点。
+    @MainActor
+    private func notifyUnchangedStatusIconAppearance(_ button: NSStatusBarButton) {
+        button.willChangeValue(forKey: "effectiveAppearance")
+        button.didChangeValue(forKey: "effectiveAppearance")
+    }
+
     @Test
     func statusIconBurstPaletteMatchesModuleAndFailureSemantics() {
         #expect(StatusTranslationIconState.translating.burstStops(isDark: false).count == 2)
