@@ -117,11 +117,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = ""
             button.imagePosition = .imageRight
             button.imageScaling = .scaleNone
-            button.toolTip = "划词翻译：按 Option+Tab"
+            // 状态详情由点击面板和无障碍标签提供，避免系统悬停提示滞留在普通窗口附近。
+            button.toolTip = nil
             button.setAccessibilityLabel("划词翻译")
             button.target = self
             button.action = #selector(toggleStatusPopover)
-            // 整个状态项统一打开面板；在按下时记录前台应用，圆点仅作为休眠状态指示。
+            // 整个状态项统一打开面板；在按下时记录前台应用，底色只表达休眠状态。
             button.sendAction(on: .leftMouseDown)
             setupStatusIcon(in: button, statusBarThickness: statusBar.thickness)
         }
@@ -140,9 +141,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.sleepMenuItem = sleepMenuItem
         sleepPreventionController.onStateChange = { [weak self] in
             self?.updateSleepPreventionUI()
-        }
-        sleepPreventionController.onIndicatorChange = { [weak self] in
-            self?.updateStatusItemAppearance()
         }
         menu.addItem(.separator())
         menu.addItem(makeMenuItem(title: "iPhone 定位", action: #selector(showIPhoneLocation)))
@@ -206,14 +204,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 休眠控制器仍是唯一状态来源，同时更新命令标题与原绿灯。
+    /// 休眠控制器仍是唯一状态来源，同时更新命令标题与常驻底色。
     private func updateSleepPreventionUI() {
         sleepMenuItem?.title = sleepPreventionController.actionTitle
         powerPopover?.refreshCommands()
         updateStatusItemAppearance()
     }
 
-    /// 原绿灯仍由休眠控制器驱动，电源前缀的静态附件单独更新。
+    /// 仅休眠状态切换时更新底色；电源前缀继续使用独立采样与缓存。
     private func updateStatusItemAppearance() {
         guard statusItem?.button != nil else {
             return
@@ -221,7 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let isPreventingSleep = sleepPreventionController.isPreventingSleep
         statusIconAnimator?.isPreventingSleep = isPreventingSleep
-        statusIconAnimator?.isSleepIndicatorBright = sleepPreventionController.isSleepStatusLightBright
 
         updatePowerStatusButton()
     }
@@ -233,14 +230,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         powerPopover?.update(snapshot: snapshot, presentation: powerPresentation, history: powerMonitor.history.samples)
     }
 
-    /// 标题附件变化才重绘；主题改变时独立失效缓存，不扩大原动态图像的尺寸。
+    /// 电源前缀变化后交给原生图像合成器，整组底色与图标共享同一张菜单栏图片。
     private func updatePowerStatusButton() {
         guard let button = statusItem?.button else { return }
         powerStatusDisplay.update(powerPresentation, button: button)
+        statusIconAnimator?.powerPrefixImage = powerStatusDisplay.image
         var description = "划词翻译；\(powerPresentation.state.title)，\(powerPresentation.percent)"
         if let power = powerPresentation.menuPowerDescription { description += "；\(power)" }
         if sleepPreventionController.isPreventingSleep { description += "；禁止休眠中" }
-        button.toolTip = description + "；按 Option+Tab"
         button.setAccessibilityLabel(description)
     }
 

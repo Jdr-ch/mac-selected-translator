@@ -13,20 +13,15 @@ struct WindowLayoutPlannerTests {
 
     /// Verifies the approved icon geometry and animation cadence stay aligned with the design.
     @Test
-    func testStatusItemVisualStyleCombinesTranslationIconAndSleepLight() {
+    func testStatusItemVisualStyleKeepsNativeIconGeometry() {
         #expect(StatusItemVisualStyle.itemLength(statusBarThickness: 22) == 44)
         #expect(StatusItemVisualStyle.iconSize == CGSize(width: 26, height: 22))
-        #expect(StatusItemVisualStyle.sleepIndicatorDiameter == 8)
-        #expect(StatusItemVisualStyle.sleepIndicatorCenterOffset == -13)
-        #expect(StatusItemVisualStyle.iconCenterOffsetWhilePreventingSleep == 9)
         #expect(StatusItemVisualStyle.idleBreathingDuration == 2.3)
         #expect(StatusItemVisualStyle.idleMotionDuration == 5.76)
         #expect(StatusItemVisualStyle.idleMotionDuration / 1.2 == 4.8)
         #expect(StatusItemVisualStyle.idleFlipTurns == 1)
         #expect(StatusItemVisualStyle.idleRotationTurns == 1)
         #expect(StatusItemVisualStyle.translatingSwapDuration == 1.1)
-        #expect(StatusItemVisualStyle.sleepPulseDuration == 1.3)
-        #expect(StatusItemVisualStyle.sleepPulseScale > 2)
     }
 
     /// Exercises the actual native status-button image instead of an unrelated standalone NSButton.
@@ -108,10 +103,10 @@ struct WindowLayoutPlannerTests {
         #expect(button.image === restored)
     }
 
-    /// 分别覆盖空闲交换与低频休眠脉冲，真实动画像素更新不得替换图片或改变按钮几何。
+    /// 空闲交换按帧更新，常驻休眠底色仅随状态切换更新；两者均保持图片对象与按钮几何。
     @MainActor
     @Test(arguments: [false, true])
-    func statusIconFramesUpdatePixelsWithoutReplacingNativeImage(pulseOnly: Bool) async throws {
+    func statusIconFramesUpdatePixelsWithoutReplacingNativeImage(sleepOnly: Bool) async throws {
         let item = NSStatusBar.system.statusItem(withLength: 44)
         item.isVisible = false
         defer { NSStatusBar.system.removeStatusItem(item) }
@@ -119,14 +114,24 @@ struct WindowLayoutPlannerTests {
         button.appearance = NSAppearance(named: .aqua)
         let originalSubviews = button.subviews
         let animator = StatusItemIconAnimator(button: button, statusBarThickness: 22)
-        animator.idleExchangeEnabled = !pulseOnly
-        animator.isPreventingSleep = pulseOnly
+        animator.idleExchangeEnabled = !sleepOnly
+        animator.isPreventingSleep = sleepOnly
         animator.start()
         defer { animator.stop() }
         let initial = try #require(button.image)
         let initialPixels = try #require(initial.tiffRepresentation)
         let imageFrame = try #require(button.cell).imageRect(forBounds: button.bounds)
         try await Task.sleep(for: .milliseconds(150))
+        if sleepOnly {
+            // 状态未切换时，时间流逝不能改变底色；关闭后仍保持按钮与原生图片几何。
+            #expect(button.image?.tiffRepresentation == initialPixels)
+            let bitmap = try #require(initial.representations.first as? NSBitmapImageRep)
+            let backgroundColor = try #require(bitmap.colorAt(x: 4, y: 22)?.usingColorSpace(.deviceRGB))
+            #expect(backgroundColor.redComponent > backgroundColor.greenComponent + 0.4)
+            #expect(backgroundColor.redComponent > backgroundColor.blueComponent + 0.4)
+            #expect(backgroundColor.alphaComponent > 0.1)
+            animator.isPreventingSleep = false
+        }
         #expect(button.image === initial)
         #expect(button.image?.tiffRepresentation != initialPixels)
         #expect(button.cell?.imageRect(forBounds: button.bounds) == imageFrame)

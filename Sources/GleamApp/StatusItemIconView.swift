@@ -1,23 +1,17 @@
 import AppKit
 import QuartzCore
 
-/// 统一菜单栏图标与休眠状态圆点的绘制尺寸和动画周期；圆点不承担独立点击操作。
+/// 统一 A/文 绘制区域与动画周期；休眠状态使用整组原生图像的静态底色。
 enum StatusItemVisualStyle {
     static let iconSize = CGSize(width: 26, height: 22)
-    static let sleepIndicatorDiameter: CGFloat = 8
-    static let sleepIndicatorCenterOffset: CGFloat = -13
-    static let iconCenterOffsetWhilePreventingSleep: CGFloat = 9
     static let idleBreathingDuration: TimeInterval = 2.3
     static let idleMotionDuration: TimeInterval = 5.76
     static let idleFlipTurns: CGFloat = 1
     static let idleRotationTurns: CGFloat = 1
     static let translatingSwapDuration: TimeInterval = 1.1
     static let translatingOrbitDuration: TimeInterval = 0.9
-    static let sleepPulseDuration: TimeInterval = 1.3
-    static let sleepPulseScale: CGFloat = 2.15
-    /// 复杂动效保持 30 帧；只有 8pt 圆点在脉冲时采用 15 帧，周期仍按实际经过时间计算。
+    /// 复杂动效保持 30 帧；休眠底色只在状态切换时更新，不使用刷新计时器。
     static let animationFrameInterval: TimeInterval = 1 / 30
-    static let sleepPulseFrameInterval: TimeInterval = 1 / 15
 
     /// 色散动效：合拢 → 色散 → 绕转 → 收拢，对应 App 图标「一道光被拆成几束」的语言。
     static let dispersionCollapseDuration: TimeInterval = 0.18
@@ -78,13 +72,6 @@ enum StatusItemPalette {
         isDark
             ? NSColor(calibratedRed: 1, green: 0.42, blue: 0.45, alpha: 1)
             : NSColor(calibratedRed: 0.851, green: 0.157, blue: 0.196, alpha: 1)
-    }
-
-    /// 禁止休眠属于系统级状态徽标，用中性色避免与「工作场景」的绿抢色相。
-    static func neutral(_ isDark: Bool) -> NSColor {
-        isDark
-            ? NSColor(calibratedRed: 0.78, green: 0.81, blue: 0.85, alpha: 1)
-            : NSColor(calibratedRed: 0.42, green: 0.45, blue: 0.49, alpha: 1)
     }
 
     static func dispersion(_ isDark: Bool) -> [NSColor] {
@@ -233,7 +220,14 @@ private func easeOut(_ progress: CGFloat) -> CGFloat {
 /// Publishes bitmap frames through NSStatusBarButton.image; no child view can steal mouse tracking.
 @MainActor
 final class StatusItemIconAnimator: NSObject {
-    /// 主题切换只使电源静态附件失效一次，不随动画帧回调。
+    /// 静态底图按 point 尺寸、主题与休眠状态缓存；电源前缀对象变化时主动失效。
+    private struct BaseImageKey: Equatable {
+        let size: CGSize
+        let isDark: Bool
+        let isPreventingSleep: Bool
+    }
+
+    /// 主题切换只使电源静态前缀失效一次，不随动画帧回调。
     var onAppearanceChange: (() -> Void)?
     /// 空闲时是否保留 A/文 互换。默认关闭：空闲不再逐帧重绘，动画全部由状态切换驱动。
     var idleExchangeEnabled = false
@@ -243,7 +237,11 @@ final class StatusItemIconAnimator: NSObject {
     /// 字体和字形固定，按主题缓存 A/文 的属性及 point 尺寸，供所有动画帧复用。
     private var textGlyphLayouts: [Bool: [String: TextGlyphLayout]] = [:]
     private weak var button: NSStatusBarButton?
+    /// A/文 独立区域的逻辑尺寸，合成时在左侧追加电源前缀的宽度。
     private let imageSize: CGSize
+    /// 底色与电源前缀共用一份缓存，翻译动画帧直接复用，避免重复绘制静态内容。
+    private var baseImageKey: BaseImageKey?
+    private var baseImage: NSImage?
     private var frameTimer: Timer?
     private var failureResetTimer: Timer?
     private var appearanceObservation: NSKeyValueObservation?
@@ -274,11 +272,16 @@ final class StatusItemIconAnimator: NSObject {
     }
 
     var isPreventingSleep = false {
-        didSet { if isPreventingSleep != oldValue { updateTimer(); updateImage() } }
+        didSet { if isPreventingSleep != oldValue { updateImage() } }
     }
 
-    var isSleepIndicatorBright = true {
-        didSet { if isSleepIndicatorBright != oldValue { updateImage() } }
+    /// 电源模块只在内容或主题变化时替换此位图；保持同一对象时不触发菜单栏重绘。
+    var powerPrefixImage: NSImage? {
+        didSet {
+            guard powerPrefixImage !== oldValue else { return }
+            baseImage = nil
+            updateImage()
+        }
     }
 
     init(button: NSStatusBarButton, statusBarThickness: CGFloat) {
@@ -320,21 +323,17 @@ final class StatusItemIconAnimator: NSObject {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// 只有真的在动的时候才起定时器：空闲且开着休眠绿灯时才保留脉冲。
+    /// 仅工作动效、收尾或显式空闲交换需要逐帧更新；常驻休眠底色不参与计时。
     private var needsAnimation: Bool {
         guard !reduceMotion else { return false }
         if animationState.isActive || settleStart != nil { return true }
-        if isPreventingSleep { return true }
         return idleExchangeEnabled
     }
 
     /// Common run-loop modes keep the animation alive while the native menu is tracking clicks.
     private func updateTimer() {
         let shouldRun = needsAnimation
-        // 切入工作动效或收尾时恢复完整帧率，不能复用空闲圆点的低频定时器。
-        let interval = animationState.isActive || settleStart != nil || idleExchangeEnabled
-            ? StatusItemVisualStyle.animationFrameInterval
-            : StatusItemVisualStyle.sleepPulseFrameInterval
+        let interval = StatusItemVisualStyle.animationFrameInterval
         if shouldRun, frameTimer?.timeInterval == interval { return }
         frameTimer?.invalidate()
         frameTimer = nil
@@ -402,13 +401,48 @@ final class StatusItemIconAnimator: NSObject {
         failureResetTimer = timer
     }
 
-    /// Stores real Retina pixels in the image instead of a view/layer tree that only exists on one screen.
+    /// 电源前缀、底色与 A/文 合成为同一张 Retina 位图，保持原生点击高亮与跨屏复制路径。
     func image(at elapsed: TimeInterval, isDark: Bool, reduceMotion: Bool) -> NSImage? {
+        let prefixWidth = powerPrefixImage?.size.width ?? 0
+        let size = CGSize(width: prefixWidth + imageSize.width, height: imageSize.height)
+        guard let base = cachedBaseImage(size: size, isDark: isDark) else { return nil }
+        return bitmapImage(size: size) { context in
+            base.draw(in: CGRect(origin: .zero, size: size))
+            let time = reduceMotion ? 0 : elapsed
+            context.translateBy(x: prefixWidth + imageSize.width / 2 - 13, y: 0)
+            context.translateBy(x: shakeOffset(at: time, reduceMotion: reduceMotion), y: 0)
+            let settle = settleProgress(reduceMotion: reduceMotion)
+            drawScene(in: context, at: time, settle: settle, isDark: isDark, reduceMotion: reduceMotion)
+        }
+    }
+
+    /// 底色覆盖整组内容；仅尺寸、主题、休眠状态或前缀变化时重新生成静态底图。
+    private func cachedBaseImage(size: CGSize, isDark: Bool) -> NSImage? {
+        let key = BaseImageKey(size: size, isDark: isDark, isPreventingSleep: isPreventingSleep)
+        if baseImageKey == key, let baseImage { return baseImage }
+        guard let image = bitmapImage(size: size, draw: { _ in
+            if isPreventingSleep {
+                // 深浅主题使用不同透明度，使常驻淡红底色与系统点击高亮仍能同时辨认。
+                StatusItemPalette.failure(isDark).withAlphaComponent(isDark ? 0.28 : 0.24).setFill()
+                let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 1)
+                NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+            }
+            if let powerPrefixImage {
+                powerPrefixImage.draw(in: CGRect(origin: .zero, size: powerPrefixImage.size))
+            }
+        }) else { return nil }
+        baseImageKey = key
+        baseImage = image
+        return image
+    }
+
+    /// 为底图和动画帧提供相同的 2× 像素与绘制上下文；分配失败时保留上一张已发布图片。
+    private func bitmapImage(size: CGSize, draw: (CGContext) -> Void) -> NSImage? {
         let scale: CGFloat = 2
         guard let bitmap = NSBitmapImageRep(
             bitmapDataPlanes: nil,
-            pixelsWide: Int(imageSize.width * scale),
-            pixelsHigh: Int(imageSize.height * scale),
+            pixelsWide: Int(size.width * scale),
+            pixelsHigh: Int(size.height * scale),
             bitsPerSample: 8,
             samplesPerPixel: 4,
             hasAlpha: true,
@@ -417,23 +451,15 @@ final class StatusItemIconAnimator: NSObject {
             bytesPerRow: 0,
             bitsPerPixel: 0
         ), let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
-        bitmap.size = imageSize
+        bitmap.size = size
         NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
         NSGraphicsContext.current = graphics
         let context = graphics.cgContext
         context.scaleBy(x: scale, y: scale)
-        context.clear(CGRect(origin: .zero, size: imageSize))
-        let time = reduceMotion ? 0 : elapsed
-        if isPreventingSleep {
-            drawSleepIndicator(in: context, at: time, isDark: isDark, reduceMotion: reduceMotion)
-        }
-        let offset = isPreventingSleep ? StatusItemVisualStyle.iconCenterOffsetWhilePreventingSleep : 0
-        context.translateBy(x: imageSize.width / 2 - 13 + offset, y: 0)
-        context.translateBy(x: shakeOffset(at: time, reduceMotion: reduceMotion), y: 0)
-        let settle = settleProgress(reduceMotion: reduceMotion)
-        drawScene(in: context, at: time, settle: settle, isDark: isDark, reduceMotion: reduceMotion)
-        NSGraphicsContext.restoreGraphicsState()
-        let image = NSImage(size: imageSize)
+        context.clear(CGRect(origin: .zero, size: size))
+        draw(context)
+        let image = NSImage(size: size)
         image.addRepresentation(bitmap)
         image.isTemplate = false
         return image
@@ -767,24 +793,4 @@ final class StatusItemIconAnimator: NSObject {
         return layout
     }
 
-    private func drawSleepIndicator(in context: CGContext, at elapsed: TimeInterval, isDark: Bool, reduceMotion: Bool) {
-        let center = CGPoint(x: imageSize.width / 2 + StatusItemVisualStyle.sleepIndicatorCenterOffset, y: imageSize.height / 2)
-        let tint = StatusItemPalette.neutral(isDark)
-        context.saveGState()
-        if !reduceMotion {
-            let phase = elapsed.truncatingRemainder(dividingBy: StatusItemVisualStyle.sleepPulseDuration)
-                / StatusItemVisualStyle.sleepPulseDuration
-            let radius = StatusItemVisualStyle.sleepIndicatorDiameter / 2
-                * (0.65 + phase * (StatusItemVisualStyle.sleepPulseScale - 0.65))
-            context.setStrokeColor(tint.withAlphaComponent(0.95 * (1 - phase)).cgColor)
-            context.setLineWidth(1.8)
-            context.setShadow(offset: .zero, blur: 3.5, color: tint.withAlphaComponent(0.7 * (1 - phase)).cgColor)
-            context.strokeEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
-        }
-        let radius = StatusItemVisualStyle.sleepIndicatorDiameter / 2
-        context.setFillColor(tint.withAlphaComponent(isSleepIndicatorBright ? 1 : 0.75).cgColor)
-        context.setShadow(offset: .zero, blur: 2.5, color: tint.withAlphaComponent(0.9).cgColor)
-        context.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
-        context.restoreGState()
-    }
 }

@@ -19,7 +19,6 @@ struct SleepPreventionControllerTests {
 
         #expect(!controller.isPreventingSleep)
         #expect(controller.actionTitle == "禁止休眠")
-        #expect(controller.isSleepStatusLightBright)
         #expect(stateChangeCount == 2)
 
         notificationCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)

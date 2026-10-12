@@ -21,7 +21,7 @@ enum PowerIconStyle {
         }
     }
 
-    /// 输出实际 Retina 位图，供原生按钮附件跨菜单栏显示；不创建自绘子视图。
+    /// 输出实际 Retina 位图，供原生状态项图像合成与跨屏显示；不创建自绘子视图。
     static func image(for state: PowerState, dark: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: size, height: size))
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36,
@@ -57,7 +57,7 @@ enum PowerIconStyle {
     }
 }
 
-/// 电源文字与方块缓存为原生 attributedTitle 附件，原 A/文动画继续只生成原宽度图片。
+/// 缓存电源文字与方块，交给菜单栏图像合成器统一绘制底色及 A/文动画。
 @MainActor
 final class PowerStatusDisplay {
     private struct CacheKey: Equatable {
@@ -69,13 +69,14 @@ final class PowerStatusDisplay {
     private var badges: [PowerState: NSImage] = [:]
     private var cachedDark: Bool?
     private(set) var renderCount = 0
+    /// 仅显示内容或主题变化时替换对象；动画帧复用此静态前缀。
+    private(set) var image: NSImage?
 
-    /// 只有显示内容或主题变化才重建附件；主图每秒 30 帧的更新不会调用此绘制路径。
+    /// 从按钮读取深浅主题并缓存前缀位图，不再设置标题附件或改变按钮的点击链路。
     func update(_ presentation: PowerPresentation, button: NSStatusBarButton) {
         let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let key = CacheKey(state: presentation.state, value: presentation.menuValue, dark: dark)
         guard key != lastKey else { return }
-        lastKey = key
         if cachedDark != dark {
             badges.removeAll()
             cachedDark = dark
@@ -103,26 +104,9 @@ final class PowerStatusDisplay {
         badge.draw(in: CGRect(x: valueWidth, y: 2, width: PowerIconStyle.size, height: PowerIconStyle.size))
         NSGraphicsContext.restoreGraphicsState()
         image.addRepresentation(bitmap)
-        let attachment = NSTextAttachment()
-        attachment.attachmentCell = PowerStatusAttachmentCell(imageCell: image)
-        button.attributedTitle = NSAttributedString(attachment: attachment)
-        button.imagePosition = .imageRight
+        image.isTemplate = false
+        self.image = image
+        lastKey = key
         renderCount += 1
-    }
-}
-
-/// 原生状态按钮的标题按文字基线定位，真实菜单栏与离屏绘制可能给出不同的附件纵坐标。
-/// 复用原生附件的横向排版，将缓存图片直接对齐按钮中心，不依赖固定基线偏移或透明覆盖层。
-@MainActor
-private final class PowerStatusAttachmentCell: NSTextAttachmentCell {
-    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
-        guard let controlView, let image else {
-            super.draw(withFrame: cellFrame, in: controlView)
-            return
-        }
-        let alignedFrame = NSRect(x: cellFrame.minX, y: controlView.bounds.midY - image.size.height / 2,
-                                  width: cellFrame.width, height: image.size.height)
-        image.draw(in: alignedFrame, from: .zero, operation: .sourceOver, fraction: 1,
-                   respectFlipped: true, hints: nil)
     }
 }

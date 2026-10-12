@@ -201,7 +201,7 @@ struct PowerMonitorTests {
         #expect(monitor.sampleCount >= count)
     }
 
-    /// 标题缓存不改变动画图片大小，也不新增拦截点击的子视图。
+    /// 静态前缀命中缓存后不重复绘制，整组图像没有标题附件或拦截点击的子视图。
     @Test func staticPrefixCachesAndKeepsNativeImageGeometry() throws {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.isVisible = false
@@ -214,14 +214,16 @@ struct PowerMonitorTests {
         let snapshot = PowerSnapshot.decode(registry: Self.registry, source: [:])
         let presentation = PowerPresentation(snapshot: snapshot, showPower: true)
         for _ in 0..<90 { display.update(presentation, button: button) }
+        animator.powerPrefixImage = display.image
         #expect(display.renderCount == 1)
-        #expect(button.image?.size == CGSize(width: 44, height: 22))
+        #expect(display.image?.size == CGSize(width: 84, height: 22))
+        #expect(button.image?.size == CGSize(width: 128, height: 22))
         #expect(button.subviews == subviews)
-        #expect(button.attributedTitle.length == 1)
+        #expect(button.attributedTitle.length == 0)
         button.setFrameSize(NSSize(width: try #require(button.cell).cellSize.width, height: 24))
         let bounds = button.bounds
         let imageFrame = try #require(button.cell).imageRect(forBounds: bounds)
-        #expect(imageFrame.width == 44 && imageFrame.minX > 60)
+        #expect(imageFrame.width == 128)
         // 功率保留一位小数后相同则命中缓存；隐藏数字后，任意功率读数变化也不应重绘前缀。
         var sample = snapshot
         sample.state = .externalPower
@@ -246,8 +248,20 @@ struct PowerMonitorTests {
                 var sample = snapshot
                 sample.state = state
                 display.update(PowerPresentation(snapshot: sample, showPower: true), button: button)
+                animator.powerPrefixImage = display.image
                 animator.isPreventingSleep = true
                 button.image = animator.image(at: 0, isDark: dark, reduceMotion: true)
+                // 左端取上方留白以避开电源方块，右端取 A/文 外侧；两处都应显示红色底色。
+                let bitmap = try #require(button.image?.representations.first as? NSBitmapImageRep)
+                for (x, y) in [(20, 3), (bitmap.pixelsWide - 5, 22)] {
+                    let background = try #require(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                    #expect(background.alphaComponent > 0.1)
+                    #expect(background.redComponent > background.greenComponent + 0.4)
+                }
+                animator.isPreventingSleep = false
+                let disabled = try #require(button.image?.representations.first as? NSBitmapImageRep)
+                #expect(try #require(disabled.colorAt(x: disabled.pixelsWide - 5, y: 22)).alphaComponent < 0.01)
+                animator.isPreventingSleep = true
                 button.setFrameSize(NSSize(width: try #require(button.cell).cellSize.width, height: 24))
                 try export(button, name: "status-\(state.rawValue)-\(dark ? "dark" : "light")")
             }
@@ -267,9 +281,10 @@ struct PowerMonitorTests {
             var snapshot = PowerSnapshot.decode(registry: Self.registry, source: [:])
             snapshot.state = state
             display.update(PowerPresentation(snapshot: snapshot, showPower: true), button: button)
+            animator.powerPrefixImage = display.image
             try await Task.sleep(for: .milliseconds(40))
             try verifyBadgeCenter(in: button, state: state)
-            // 系统会把 NSStatusBarButton 高度恢复为菜单栏高度，其他尺寸用原生 NSButton 承载同一附件。
+            // 系统会恢复菜单栏高度，其他尺寸用原生 NSButton 承载同一张合成图片。
             for height: CGFloat in [22, 24, 32, 39] {
                 let sample = NSButton(frame: NSRect(x: 0, y: 0, width: button.bounds.width, height: height))
                 sample.isBordered = false
@@ -289,7 +304,9 @@ struct PowerMonitorTests {
         let height = button.bounds.height
         let scale = CGFloat(bitmap.pixelsHigh) / height
         let imageFrame = try #require(button.cell).imageRect(forBounds: button.bounds)
-        let colored = try #require(badgeBounds(in: bitmap, beforeX: Int(imageFrame.minX * scale), state: state))
+        // 合成图片左侧为电源前缀，限制搜索范围，避免将右侧 A/文 的蓝绿像素误认为电源方块。
+        let prefixWidth = imageFrame.width - StatusItemVisualStyle.itemLength(statusBarThickness: NSStatusBar.system.thickness)
+        let colored = try #require(badgeBounds(in: bitmap, beforeX: Int((imageFrame.minX + prefixWidth) * scale), state: state))
         #expect(abs(colored.midY / scale - height / 2) <= 1)
         #expect(colored.height / scale >= 17)
     }

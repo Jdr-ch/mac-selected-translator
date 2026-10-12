@@ -1,20 +1,14 @@
 import Foundation
 
-/// Owns the process activity and indicator timing used while idle sleep is disabled.
+/// Owns the sleep assertion and one-shot restoration; menu-bar feedback updates only on state changes.
 final class SleepPreventionController: NSObject {
     /// Notifies the owner when the sleep assertion changes so all visible state stays synchronized.
     var onStateChange: (() -> Void)?
-    /// Notifies the owner on each flash phase without creating a second menu-bar item.
-    var onIndicatorChange: (() -> Void)?
 
     /// A non-nil activity means both system and display idle sleep are currently blocked.
     private var sleepPreventionActivity: NSObjectProtocol?
-    /// The indicator timer runs in common mode so opening a menu does not pause its feedback.
-    private var sleepStatusFlashTimer: Timer?
     private var automaticSleepRestorationTimer: Timer?
     private let screenLockNotificationCenter: NotificationCenter
-    /// Tracks the current pulse phase and resets to fully bright whenever prevention stops.
-    private(set) var isSleepStatusLightBright = true
 
     init(screenLockNotificationCenter: NotificationCenter = DistributedNotificationCenter.default()) {
         self.screenLockNotificationCenter = screenLockNotificationCenter
@@ -31,7 +25,7 @@ final class SleepPreventionController: NSObject {
         screenLockNotificationCenter.removeObserver(self)
     }
 
-    /// Drives both the menu action and the green light from the process activity source of truth.
+    /// Drives both the menu action and the sleep indicator from the process activity source of truth.
     var isPreventingSleep: Bool {
         sleepPreventionActivity != nil
     }
@@ -66,7 +60,7 @@ final class SleepPreventionController: NSObject {
         }
     }
 
-    /// Releases the process activity and stops indicator timing during app termination or menu toggle.
+    /// Releases the sleep assertion and cancels scheduled restoration during termination or menu toggle.
     func restoreSystemSleep() {
         automaticSleepRestorationTimer?.invalidate()
         automaticSleepRestorationTimer = nil
@@ -74,7 +68,6 @@ final class SleepPreventionController: NSObject {
             ProcessInfo.processInfo.endActivity(sleepPreventionActivity)
             self.sleepPreventionActivity = nil
         }
-        stopFlashingSleepStatusLight()
         onStateChange?()
     }
 
@@ -96,7 +89,6 @@ final class SleepPreventionController: NSObject {
             options: [.idleSystemSleepDisabled, .idleDisplaySleepDisabled],
             reason: "用户已在划词翻译工具中启用禁止休眠"
         )
-        startFlashingSleepStatusLight()
         scheduleAutomaticSleepRestoration(enabledAt: enabledAt)
         onStateChange?()
     }
@@ -111,34 +103,5 @@ final class SleepPreventionController: NSObject {
         }
         RunLoop.main.add(timer, forMode: .common)
         automaticSleepRestorationTimer = timer
-    }
-
-    /// Starts a low-frequency flash phase consumed by the app's single combined status item.
-    private func startFlashingSleepStatusLight() {
-        sleepStatusFlashTimer?.invalidate()
-        isSleepStatusLightBright = true
-
-        let timer = Timer(
-            timeInterval: 0.65,
-            target: self,
-            selector: #selector(toggleSleepStatusLightBrightness),
-            userInfo: nil,
-            repeats: true
-        )
-        RunLoop.main.add(timer, forMode: .common)
-        sleepStatusFlashTimer = timer
-    }
-
-    /// Changes only the green light's opacity while the translation icon remains fully visible.
-    @objc private func toggleSleepStatusLightBrightness() {
-        isSleepStatusLightBright.toggle()
-        onIndicatorChange?()
-    }
-
-    /// Stops visual feedback and resets the next active state to a fully lit indicator.
-    private func stopFlashingSleepStatusLight() {
-        sleepStatusFlashTimer?.invalidate()
-        sleepStatusFlashTimer = nil
-        isSleepStatusLightBright = true
     }
 }
